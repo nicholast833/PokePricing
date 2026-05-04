@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 
 # Load environment variables (from local file if it exists, otherwise rely on GitHub Action Secrets)
 try:
-    load_dotenv('../scrape/ebay_listing_checker.env')
+    load_dotenv('scrape/ebay_listing_checker.env')
 except:
     pass
 
@@ -67,24 +67,71 @@ def run_queue():
     success_count = 0
     error_count = 0
     
-    # 2. Process each card (Placeholder for actual API integration)
+    # 2. Process each card
+    from tcggo_api_fetcher import fetch_tcggo_price_history, extract_latest_market_price
+    from ebay_api_fetcher import fetch_ebay_sold_listings
+    
+    tcgpro_key = os.environ.get("TCGPRO_API_KEY")
+    ebay_app_id = os.environ.get("EBAY_APP_ID")
+    
     for index, card in enumerate(cards):
         card_id = card['unique_card_id']
         name = card['name']
+        set_code = card['set_code']
+        metrics = card.get('metrics') or {}
+        price_history = card.get('price_history') or {}
         last_sync = card['last_synced_at'] or "NEVER"
         
-        logging.info(f"[{index+1}/{len(cards)}] Processing: {name} (Last sync: {last_sync})")
+        logging.info(f"[{index+1}/{len(cards)}] Processing: {name} ({set_code}) (Last sync: {last_sync})")
         
         try:
-            # TODO: Call TCGPro API for this card
-            # TODO: Call Pokemon Wizard Scraper for this card
-            # TODO: Call eBay API for this card
+            updates_made = False
+            today_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
             
-            # 3. Update the last_synced_at timestamp to push it to the back of the queue
+            # --- 1. TCGGO API (TCGPro) ---
+            tcgplayer_id = metrics.get('tcgtracking_product_id')
+            if tcgplayer_id and tcgpro_key:
+                logging.info(f"  -> Fetching TCGGO history for tcgplayer_id={tcgplayer_id}")
+                tcg_data = fetch_tcggo_price_history(tcgplayer_id, tcgpro_key, days=2)
+                latest_market = extract_latest_market_price(tcg_data)
+                
+                if latest_market:
+                    logging.info(f"  -> TCGGO Market Price: ${latest_market}")
+                    if 'tcggo_market_history' not in price_history:
+                        price_history['tcggo_market_history'] = []
+                        
+                    # Prevent duplicates for today
+                    history_list = [h for h in price_history['tcggo_market_history'] if h.get('date') != today_iso]
+                    history_list.append({"date": today_iso, "price_usd": float(latest_market)})
+                    price_history['tcggo_market_history'] = sorted(history_list, key=lambda x: x['date'])
+                    updates_made = True
+            else:
+                logging.info("  -> Skipping TCGGO: No tcgtracking_product_id found in metrics.")
+
+            # --- 2. eBay Finding API ---
+            if ebay_app_id:
+                # Build a simple search query (e.g. "Base Set Alakazam 1/102")
+                query = f"{set_code} {name}" # Simplified for this example
+                logging.info(f"  -> Fetching eBay sold history for '{query}'")
+                sales = fetch_ebay_sold_listings(query, ebay_app_id, days=14)
+                
+                if sales['graded'] or sales['ungraded']:
+                    logging.info(f"  -> Found {len(sales['graded'])} graded, {len(sales['ungraded'])} ungraded sales.")
+                    metrics['ebay_sold_history_graded'] = sales['graded']
+                    metrics['ebay_sold_history_ungraded'] = sales['ungraded']
+                    metrics['ebay_sold_sync_iso'] = today_iso
+                    updates_made = True
+
+            # --- 3. Update Supabase ---
             current_time = datetime.datetime.now(datetime.timezone.utc).isoformat()
             
+            update_payload = {'last_synced_at': current_time}
+            if updates_made:
+                update_payload['metrics'] = metrics
+                update_payload['price_history'] = price_history
+                
             supabase.table('pokemon_cards') \
-                .update({'last_synced_at': current_time}) \
+                .update(update_payload) \
                 .eq('unique_card_id', card_id) \
                 .execute()
                 
