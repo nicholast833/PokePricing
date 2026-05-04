@@ -30,10 +30,9 @@ jobs:
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          # Ensure you have a requirements.txt file in your repository root!
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          if [ -f github_actions/requirements.txt ]; then pip install -r github_actions/requirements.txt; fi
 
-      - name: Run Daily Sync Queue
+      - name: Run Daily API Queue
         env:
           # These secrets must be added in GitHub: Settings -> Secrets and variables -> Actions
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -43,7 +42,4 @@ jobs:
           EBAY_CERT_ID: ${{ secrets.EBAY_CERT_ID }}
           EBAY_DEV_ID: ${{ secrets.EBAY_DEV_ID }}
         run: |
-          # This script doesn't exist yet, but it will be the master orchestrator
-          # python scrape/run_daily_queue.py
-          echo "This is where the python sync script will run!"
-          echo "Waiting for TCGPro API limits to be upgraded before executing..."
+          python github_actions/run_daily_api_queue.py

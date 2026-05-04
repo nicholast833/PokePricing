@@ -36,11 +36,12 @@ python -m http.server 8000.txt
 !README.md
 !walkthrough.md
 
-# Old / Unused Folders
+# Old / Local Scraper Folders
 _archive/
 data/
 .cursor/
 scripts/
+scrape/
 
 # Misc
 ebay_search.html
