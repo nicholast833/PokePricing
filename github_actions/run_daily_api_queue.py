@@ -148,6 +148,5 @@ def run_queue():
     logging.info("==========================================")
 
 if __name__ == '__main__':
-    # For testing purposes, let's artificially limit the batch to 5 so we don't accidentally update 1150 rows yet.
-    BATCH_SIZE = 5 
+    BATCH_SIZE = 1150 
     run_queue()
