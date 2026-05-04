@@ -1,0 +1,49 @@
+name: Daily PokePricing Data Sync
+
+on:
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+
+  # TODO: Uncomment the schedule block below once your TCGPro API is upgraded to 2,500/day
+  # schedule:
+  #   - cron: '0 8 * * *'  # Runs every day at 8:00 AM UTC (1:00 AM PDT)
+
+jobs:
+  sync_data:
+    runs-on: ubuntu-latest
+    
+    # Optional: Prevent multiple runs from overlapping
+    concurrency:
+      group: daily-sync
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # Ensure you have a requirements.txt file in your repository root!
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Run Daily Sync Queue
+        env:
+          # These secrets must be added in GitHub: Settings -> Secrets and variables -> Actions
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          TCGPRO_API_KEY: ${{ secrets.TCGPRO_API_KEY }}
+          EBAY_APP_ID: ${{ secrets.EBAY_APP_ID }}
+          EBAY_CERT_ID: ${{ secrets.EBAY_CERT_ID }}
+          EBAY_DEV_ID: ${{ secrets.EBAY_DEV_ID }}
+        run: |
+          # This script doesn't exist yet, but it will be the master orchestrator
+          # python scrape/run_daily_queue.py
+          echo "This is where the python sync script will run!"
+          echo "Waiting for TCGPro API limits to be upgraded before executing..."

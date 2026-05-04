@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" href="favicon.svg" type="image/svg+xml">
+    <title>Pokémon TCG Price Predictor</title>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css?v=32">
+
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <div class="glass-bg"></div>
+    <div class="container predictor-page-wide">
+        <header>
+            <h1>Pokémon TCG Price Predictor</h1>
+            <p>Predict fair market value using advanced regression and composite scarcity signals.</p>
+            <nav class="main-nav">
+                <a href="predictor.html" class="nav-link active">Predictor</a>
+                <a href="analytics.html" class="nav-link">Analytics</a>
+                <a href="index.html" class="nav-link">Explorer</a>
+
+            </nav>
+        </header>
+
+        <main id="predictor-main">
+            <div id="loading" class="loading">
+                <div class="spinner"></div>
+                <p>Initializing prediction engine...</p>
+            </div>
+
+            <div id="predictor-container" style="display: none;">
+                <div class="predictor-hero">
+                    <div class="predictor-search-box">
+                        <label for="predictorSearch" class="analytics-field-label">Search for any card</label>
+                        <div class="predictor-input-wrap">
+                            <input type="search" id="predictorSearch" class="predictor-input" placeholder="e.g. Umbreon VMAX, Charizard..." autocomplete="off">
+                            <div id="predictorResults" class="predictor-results" hidden></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="prediction-view" class="prediction-view" style="display: none;">
+                    <div class="prediction-layout">
+                        <!-- Left Pillar: Card Identity & Stats -->
+                        <div class="prediction-card-column">
+                            <div id="card-hero-container" class="card-hero-glass">
+                                <!-- Card Image & Basic Info Inserted Here -->
+                            </div>
+                            <div id="similar-cards-container" class="similar-cards-glass" style="display:none;">
+                                <h3 class="similar-cards-glass__heading">Similar Cards (Species)</h3>
+                                <div id="similar-cards-list" class="similar-cards-glass__list"></div>
+                            </div>
+                        </div>
+
+                        <!-- Right Pillar: The Prediction Scorecard -->
+                        <div class="prediction-stats-column">
+                            <div class="scorecard-glass">
+                                <div class="scorecard-header">
+                                    <h2>Market Prediction</h2>
+                                    <div class="scorecard-model-tag" id="model-tag" title="View in Analytics">VIA Analytics LSRL Composite</div>
+                                </div>
+
+                                <div class="prediction-main-stats">
+                                    <div class="stat-hero">
+                                        <div class="stat-label">Predicted Price</div>
+                                        <div class="stat-value predicted-value" id="val-predicted">—</div>
+                                        <p id="val-predicted-note" class="prediction-predicted-note" hidden></p>
+                                    </div>
+                                    <div class="stat-hero">
+                                        <div class="stat-label">Actual Market</div>
+                                        <div class="stat-value actual-value" id="val-actual">—</div>
+                                    </div>
+                                    <div class="stat-hero">
+                                        <div class="stat-label">Discrepancy</div>
+                                        <div class="stat-value discrepancy-value" id="val-discrepancy">—</div>
+                                    </div>
+                                </div>
+
+                                <div class="discrepancy-bar-container">
+                                    <div class="discrepancy-bar-track">
+                                        <div id="discrepancy-pointer" class="discrepancy-pointer"></div>
+                                    </div>
+                                    <div class="discrepancy-labels">
+                                        <span>Underpriced</span>
+                                        <span>At Fit</span>
+                                        <span>Speculative</span>
+                                    </div>
+                                </div>
+
+                                <div class="reasoning-box">
+                                    <h3>Model Reasoning</h3>
+                                    <p id="prediction-reasoning" class="reasoning-text">Select a card to see the market analysis.</p>
+                                </div>
+                            </div>
+
+                            <div class="prediction-details-box scorecard-glass prediction-details-split">
+                                <details class="prediction-data-details" open>
+                                    <summary class="prediction-data-details-summary">Data collected for this card</summary>
+                                    <div id="prediction-stats-grid" class="prediction-data-compact"></div>
+                                </details>
+                                <div class="prediction-charts-panel">
+                                    <div id="prediction-charts-area"></div>
+                                    <p id="prediction-charts-empty" class="prediction-charts-empty" hidden>No chartable price history on this card row (Collectrics, Pokémon Wizard, or PriceCharting).</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Scripts -->
+    <script src="supabase-config.js"></script>
+    <script src="shared.js?v=35"></script>
+    <script src="regression.js"></script>
+    <script src="predictor.js"></script>
+</body>
+</html>

@@ -1,0 +1,48 @@
+# Dependencies
+node_modules/
+__pycache__/
+
+# Environments & Secrets
+.env
+*.env
+!.env.example
+ebay_listing_checker.env
+PSA API key.txt
+
+# Data Files & Backups
+*.json
+!package.json
+!tsconfig.json
+!supabase-config.js
+pokemon_sets_data.json*
+backups/
+tcg_cache/
+
+# Temporary and Scratch files
+tmp/
+scratch/
+*.log
+*.bak
+*.bak_*
+python -m http.server 8000.txt
+
+# Intermediate Data
+*.csv
+*.txt
+!requirements.txt
+
+# Documentation & Notes
+*.md
+!README.md
+!walkthrough.md
+
+# Old / Unused Folders
+_archive/
+data/
+.cursor/
+scripts/
+
+# Misc
+ebay_search.html
+limitless.html
+limitless_charizard.html

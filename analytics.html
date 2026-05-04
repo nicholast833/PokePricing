@@ -1,0 +1,786 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" href="favicon.svg" type="image/svg+xml">
+    <title>Analytics | Pokémon TCG Set Explorer</title>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css?v=32">
+
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+</head>
+<body>
+    <div class="glass-bg"></div>
+    <div class="container">
+        <header>
+            <h1>Pokémon TCG Set Explorer</h1>
+            <p>Analyze the disparity between secondary market value and statistical pull cost.</p>
+            <nav class="main-nav">
+                <a href="predictor.html" class="nav-link">Predictor</a>
+                <a href="analytics.html" class="nav-link active">Analytics</a>
+                <a href="index.html" class="nav-link">Explorer</a>
+
+            </nav>
+        </header>
+
+        <div id="loading" class="loading analytics-page-loading" role="status" aria-busy="true">
+            <div class="spinner"></div>
+            <p class="analytics-loading-msg">Loading analytics…</p>
+            <p class="analytics-loading-sub">Fetching sets and building charts</p>
+            <p id="analytics-loading-preload" class="analytics-loading-preload" hidden></p>
+            <button type="button" id="analytics-skip-preload" class="analytics-skip-preload" hidden>Skip card previews</button>
+        </div>
+
+        <div id="analytics-busy" class="analytics-page-loading analytics-busy-overlay" hidden role="status" aria-live="polite">
+            <div class="spinner"></div>
+            <p class="analytics-busy-msg">Updating charts…</p>
+        </div>
+
+        <div id="analytics-container" class="set-item expanded analytics-layout-compact" style="display: none;">
+            <div class="set-header analytics-focus-header--top">
+                <div class="analytics-focus-identity">
+                    <div class="set-title" id="analytics-title">Latest Set Analytics</div>
+                    <div class="set-meta" id="analytics-meta">Loading data…</div>
+                </div>
+                <details class="analytics-tools-drawer">
+                    <summary class="analytics-tools-drawer-summary">Data, filters &amp; tools</summary>
+                    <div class="analytics-tools-drawer-body">
+                        <div class="analytics-toolbar">
+                            <p id="analytics-filter-summary" class="analytics-filter-summary" aria-live="polite"></p>
+                            <p id="analytics-gemrate-line" class="analytics-gemrate-strip" aria-live="polite" style="margin-top:0.25rem;"></p>
+                            <p id="analytics-set-count-line" style="font-size:0.78rem; color:#94a3b8; margin:0.25rem 0;"></p>
+                            <div class="analytics-toolbar-group">
+                                <div class="analytics-toolbar-group-label">Data &amp; filters</div>
+                                <div class="analytics-toolbar-main analytics-toolbar-main--data-filters">
+                                    <div class="analytics-year-controls" role="group" aria-label="Filter compared sets by release year">
+                                        <span class="analytics-year-controls-label">Release year filter</span>
+                                        <div class="analytics-year-dual" role="group" aria-label="Release year range">
+                                            <div class="analytics-year-dual-labels" aria-hidden="true">
+                                                <span id="yearFilterMinLabel" class="analytics-year-dual-num">—</span>
+                                                <span class="analytics-year-dual-dash">–</span>
+                                                <span id="yearFilterMaxLabel" class="analytics-year-dual-num">—</span>
+                                            </div>
+                                            <div class="analytics-year-sliders-control">
+                                                <div class="analytics-year-dual-track-bg" aria-hidden="true">
+                                                    <div class="analytics-year-dual-track-fill" id="yearDualRangeFill"></div>
+                                                </div>
+                                                <input type="range" id="yearFilterMin" class="analytics-year-range analytics-year-range-from" aria-valuetext="" aria-label="Earliest release year" />
+                                                <input type="range" id="yearFilterMax" class="analytics-year-range analytics-year-range-to" aria-valuetext="" aria-label="Latest release year" />
+                                            </div>
+                                        </div>
+                                        <label class="analytics-year-mode-wrap">
+                                            <span class="analytics-year-mode-text">Sets in range</span>
+                                            <select id="yearFilterMode" class="filter-select analytics-year-mode analytics-native-select--pair" size="2" title="How sets in the release year range are applied" aria-label="Include or exclude sets in the release year range">
+                                                <option value="include">Include</option>
+                                                <option value="exclude">Exclude</option>
+                                            </select>
+                                        </label>
+                                    </div>
+                                    <div class="analytics-toolbar-field analytics-toolbar-field--add" id="analyticsAddSetFieldWrap">
+                                        <label class="analytics-field-label" for="addSetSelect">Add a set</label>
+                                        <select id="addSetSelect" class="filter-select analytics-add-set-select analytics-add-set-select--listbox">
+                                            <option value="">Choose a set to add…</option>
+                                        </select>
+                                    </div>
+                                    <p id="analyticsAddSetEmptyHint" class="analytics-add-set-empty-hint" hidden>Every set is already in the comparison. Remove one from the chips above to add a different set.</p>
+                                    <div class="analytics-bulk-actions">
+                                        <button type="button" id="addSetsInYearRangeBtn" class="analytics-btn-secondary">Add Year Range</button>
+                                        <button type="button" id="clearComparisonSetsBtn" class="analytics-btn-secondary analytics-btn-danger-outline">Clear All</button>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="analytics-toolbar-group">
+                                <div class="analytics-toolbar-group-label">Utilities &amp; audit</div>
+                                <div class="analytics-toolbar-main footer-toolbar-main">
+                                    <div class="analytics-toolbar-field analytics-toolbar-field--search">
+                                        <label class="analytics-field-label" for="analyticsCardSpeciesSearch">Find species on charts</label>
+                                        <input type="search" id="analyticsCardSpeciesSearch" class="filter-select analytics-card-species-search" placeholder="e.g. Pikachu…" autocomplete="off" />
+                                        <div id="analyticsCardSpeciesSearchOut" class="analytics-card-search-results" aria-live="polite" hidden></div>
+                                    </div>
+                                    <details class="analytics-lsrl-audit" id="analyticsLsrlAudit">
+                                        <summary>LSRL residual audit (composite)</summary>
+                                        <div class="analytics-lsrl-audit-body">
+                                            <p class="analytics-lsrl-audit-intro">Cards sorted by <strong>|Δlog₁₀y|</strong> vs the weighted LSRL. <em>Above</em> the line = pricier than fit; <em>below</em> = cheaper.</p>
+                                            <p class="analytics-lsrl-audit-intro">Large residuals often mean <strong>story, iconicity, or liquidity</strong> not yet encoded in a driver. Points with <strong>neutral X</strong> (e.g. POP series) may stack vertically, distorting logs.</p>
+                                            <ol id="analyticsLsrlOutlierList" class="analytics-lsrl-outlier-list"></ol>
+                                        </div>
+                                    </details>
+                                </div>
+                            </div>
+                            <div class="analytics-set-chips-section">
+                                <span class="analytics-set-chips-heading">Selected sets</span>
+                                <div id="analytics-set-chips" class="analytics-set-chips"></div>
+                            </div>
+                            <div class="analytics-chart-sample-options analytics-chart-sample-options--in-drawer">
+                                <label class="analytics-include-subfive-label">
+                                    <input type="checkbox" id="analyticsIncludeSubFiveDollar" checked />
+                                    <span>Include listings <strong>under $5</strong> in scatter plots, regressions, the LSRL audit list, and character-volume calibration (still excludes cards with <strong>no</strong> positive list / Dex / Track USD). <em>On by default</em> — often improves composite correlation.</span>
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+                </details>
+            </div>
+            <div class="set-content">
+                <div class="content-inner analytics-content-inner">
+                    <div id="chart-dashboard" class="chart-dashboard">
+                        <div class="chart-quadrant chart-quadrant--hero" id="quadrant-composite" data-chart-key="composite">
+                            <div class="chart-header chart-header--hero">
+                                <h3 class="chart-title">Composite vs. chart market price</h3>
+                                <div class="chart-variable-desc">
+                                    <p><strong>Primary view:</strong> <strong>X</strong> is a weighted blend of validated drivers (e.g. pull cost, print volume, popularity, hype). <strong>Y</strong> is <strong>chart market price</strong> (median USD blend across list / Dex / Track / optional anchors) on a <strong>logarithmic</strong> axis.</p>
+                                    <details class="chart-methodology-details">
+                                        <summary>How is the blend built?</summary>
+                                        <div class="methodology-content">
+                                            <p>The engine pools all selected points and screens for drivers with <strong>|Pearson r| ≥ 0.30</strong> vs price. If none clear that bar, it fallbacks to the strongest with |r| ≥ 0.15. A greedy pass then fine-tunes the selection to maximize the composite correlation. <sup>*</sup><em>linear-r used for screening; log-price target used for headline stats.</em></p>
+                                        </div>
+                                    </details>
+                                </div>
+                            </div>
+                            <div class="chart-canvas-container">
+                                <canvas id="compositeChart"></canvas>
+                            </div>
+                            <div class="chart-axis-panel chart-axis-panel--composite">
+                                <label class="chart-lsrl-toggle">
+                                    <input type="checkbox" class="lsrl-toggle" data-chart="composite" checked />
+                                    <span>Show LSRL</span>
+                                </label>
+                                <div class="chart-stats-below chart-stats-below--compact" data-stats-for="composite">
+                                    <div class="stats-equation-box stats-below-equation">
+                                        <div class="stats-label">Weighted linear regression (y on x)</div>
+                                        <div class="stats-equation stats-equation-below" data-field="eq">—</div>
+                                    </div>
+                                    <div class="stats-metrics-grid stats-metrics-below">
+                                        <div class="stat-box">
+                                            <div class="stats-label">Correlation (r)</div>
+                                            <div class="stats-value" data-field="r">—</div>
+                                        </div>
+                                        <div class="stat-box">
+                                            <div class="stats-label">R²</div>
+                                            <div class="stats-value" data-field="r2">—</div>
+                                        </div>
+                                        <div class="stat-box">
+                                            <div class="stats-label">Slope (m)</div>
+                                            <div class="stats-value" data-field="m">—</div>
+                                        </div>
+                                        <div class="stat-box">
+                                            <div class="stats-label">Points (n)</div>
+                                            <div class="stats-value" data-field="n">0</div>
+                                        </div>
+                                    </div>
+                                    <details class="stats-insight stats-insight-below stats-insight-details">
+                                        <summary class="stats-insight-summary">Regression insight</summary>
+                                        <div class="stats-insight-body" data-field="insight"></div>
+                                    </details>
+                                </div>
+                            </div>
+                        </div>
+
+                        <details class="analytics-secondary-charts" id="analyticsSecondaryCharts">
+                            <summary class="analytics-secondary-charts-summary">Other driver scatters (by |r| vs price after each rebuild)</summary>
+                        <div id="chart-dashboard-sub" class="chart-dashboard-sub">
+                        <div class="chart-quadrant chart-quadrant--compact" id="quadrant-pull-cost" data-chart-key="pullCost">
+                            <div class="chart-header">
+                                <h3 class="chart-title">Price premium vs. market</h3>
+                                <div class="chart-variable-desc">
+                                    <p><strong>X</strong> is chart market price (median USD blend). <strong>Y</strong> is the natural log of (that price ÷ estimated pull cost).</p>
+                                    <details class="chart-methodology-details">
+                                        <summary>Method details</summary>
+                                        <div class="methodology-content">
+                                            <p>Y represents the secondary-market “premium” per dollar of pull difficulty. Higher Y means a card is pricier than its rarity cohort arithmetic would suggest. Pull cost is blended from card-specific odds and slot/rarity population.</p>
+                                        </div>
+                                    </details>
+                                </div>
+                            </div>
+                            <div class="chart-canvas-container">
+                                <canvas id="pullCostChart"></canvas>
+                            </div>
+                            <div class="chart-axis-panel">
+                                <label class="chart-lsrl-toggle">
+                                    <input type="checkbox" class="lsrl-toggle" data-chart="pullCost" checked />
+                                    <span>Show LSRL</span>
+                                </label>
+                                <div class="chart-stats-below" data-stats-for="pullCost">
+                                    <div class="stats-equation-box stats-below-equation">
+                                        <div class="stats-label">Weighted linear regression (y on x)</div>
+                                        <div class="stats-equation stats-equation-below" data-field="eq">—</div>
+                                    </div>
+                                    <div class="stats-metrics-grid stats-metrics-below">
+                                        <div class="stat-box">
+                                            <div class="stats-label">Correlation (r)</div>
+                                            <div class="stats-value" data-field="r">—</div>
+                                        </div>
+                                        <div class="stat-box">
+                                            <div class="stats-label">R²</div>
+                                            <div class="stats-value" data-field="r2">—</div>
+                                        </div>
+                                        <div class="stat-box">
+                                            <div class="stats-label">Slope (m)</div>
+                                            <div class="stats-value" data-field="m">—</div>
+                                        </div>
+                                        <div class="stat-box">
+                                            <div class="stats-label">Points (n)</div>
+                                            <div class="stats-value" data-field="n">0</div>
+                                        </div>
+                                    </div>
+                                    <details class="stats-insight stats-insight-below stats-insight-details">
+                                        <summary class="stats-insight-summary">Regression insight</summary>
+                                        <div class="stats-insight-body" data-field="insight"></div>
+                                    </details>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="chart-quadrant chart-quadrant--compact" id="quadrant-character" data-chart-key="character">
+                            <div class="chart-header">
+                                <h3 class="chart-title">Character Prints vs. Price</h3>
+                                <div class="chart-variable-desc">
+                                    <p><strong>X</strong> is print volume (character file); <strong>Y</strong> is chart market price ($). Species keys are normalized; Pokémon vs Trainer lines use two colors per set when both appear.</p>
+                                    <details class="chart-methodology-details">
+                                        <summary>Axis &amp; data details</summary>
+                                        <div class="methodology-content">
+                                            <p><strong>X</strong> is high-tier print volume from the character premium file (usually linear; when there are enough points and a mild quadratic improves correlation with log price, the axis uses <strong>v + v²/s</strong> with scale <em>s</em> from the sample). Card names map to <strong>base species</strong> for lookup (e.g. Mega Gengar ex → Gengar) so form variants share the same species print count. Points are split by <code>Is_Human</code>: <strong>Pokémon</strong> species lines vs <strong>Trainers</strong> (supporter / human subjects)—two colors per set when both appear. <strong>Y</strong> is market price ($).</p>
+                                        </div>
+                                    </details>
+                                </div>
+                            </div>
+                            <div class="chart-canvas-container">
+                                <canvas id="characterChart"></canvas>
+                            </div>
+                            <div class="chart-axis-panel">
+                                <label class="chart-lsrl-toggle">
+                                    <input type="checkbox" class="lsrl-toggle" data-chart="character" checked />
+                                    <span>Show LSRL</span>
+                                </label>
+                                <div class="chart-stats-below" data-stats-for="character">
+                                    <div class="stats-equation-box stats-below-equation">
+                                        <div class="stats-label">Weighted linear regression (y on x)</div>
+                                        <div class="stats-equation stats-equation-below" data-field="eq">—</div>
+                                    </div>
+                                    <div class="stats-metrics-grid stats-metrics-below">
+                                        <div class="stat-box">
+                                            <div class="stats-label">Correlation (r)</div>
+                                            <div class="stats-value" data-field="r">—</div>
+                                        </div>
+                                        <div class="stat-box">
+                                            <div class="stats-label">R²</div>
+                                            <div class="stats-value" data-field="r2">—</div>
+                                        </div>
+                                        <div class="stat-box">
+                                            <div class="stats-label">Slope (m)</div>
+                                            <div class="stats-value" data-field="m">—</div>
+                                        </div>
+                                        <div class="stat-box">
+                                            <div class="stats-label">Points (n)</div>
+                                            <div class="stats-value" data-field="n">0</div>
+                                        </div>
+                                    </div>
+                                    <details class="stats-insight stats-insight-below stats-insight-details">
+                                        <summary class="stats-insight-summary">Regression insight</summary>
+                                        <div class="stats-insight-body" data-field="insight"></div>
+                                    </details>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="chart-quadrant chart-quadrant--compact" id="quadrant-artist-chase" data-chart-key="artistChase">
+                            <div class="chart-header">
+                                <h3 class="chart-title">Illustrator chase median vs. price</h3>
+                                <div class="chart-variable-desc">
+                                    <p><strong>X</strong> is ln(1 + artist chase median $) from <code>artist_scores.json</code>; <strong>Y</strong> is this card’s market price.</p>
+                                    <details class="chart-methodology-details">
+                                        <summary>Axis &amp; data details</summary>
+                                        <div class="methodology-content">
+                                            <p><strong>X</strong> is ln(1 + <strong>median market $</strong>) for that card’s <code>artist</code> across all chase-tier cards captured when the scraper built <code>artist_scores.json</code> (not per-set). <strong>Y</strong> is this card’s market price. Useful for “artists whose illustrated chases tend to clear high” vs. this listing—association only.</p>
+                                        </div>
+                                    </details>
+                                </div>
+                            </div>
+                            <div class="chart-canvas-container">
+                                <canvas id="artistChaseChart"></canvas>
+                            </div>
+                            <div class="chart-axis-panel">
+                                <label class="chart-lsrl-toggle">
+                                    <input type="checkbox" class="lsrl-toggle" data-chart="artistChase" checked />
+                                    <span>Show LSRL</span>
+                                </label>
+                                <div class="chart-stats-below" data-stats-for="artistChase">
+                                    <div class="stats-equation-box stats-below-equation">
+                                        <div class="stats-label">Weighted linear regression (y on x)</div>
+                                        <div class="stats-equation stats-equation-below" data-field="eq">—</div>
+                                    </div>
+                                    <div class="stats-metrics-grid stats-metrics-below">
+                                        <div class="stat-box">
+                                            <div class="stats-label">Correlation (r)</div>
+                                            <div class="stats-value" data-field="r">—</div>
+                                        </div>
+                                        <div class="stat-box">
+                                            <div class="stats-label">R²</div>
+                                            <div class="stats-value" data-field="r2">—</div>
+                                        </div>
+                                        <div class="stat-box">
+                                            <div class="stats-label">Slope (m)</div>
+                                            <div class="stats-value" data-field="m">—</div>
+                                        </div>
+                                        <div class="stat-box">
+                                            <div class="stats-label">Points (n)</div>
+                                            <div class="stats-value" data-field="n">0</div>
+                                        </div>
+                                    </div>
+                                    <details class="stats-insight stats-insight-below stats-insight-details">
+                                        <summary class="stats-insight-summary">Regression insight</summary>
+                                        <div class="stats-insight-body" data-field="insight"></div>
+                                    </details>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="chart-quadrant chart-quadrant--compact" id="quadrant-trends" data-chart-key="trends">
+                            <div class="chart-header">
+                                <h3 class="chart-title">Popularity vs. chart market price</h3>
+                                <div class="chart-variable-desc">
+                                    <p><strong>X</strong> is search/survey popularity plus graded signals: export-wide species slab share nudges the index, then each card’s <strong>log₁₀(1+graded)</strong> vs the <strong>set median</strong> stretches the axis when slab data exist. <strong>Y</strong> is chart market price ($). Composite still uses file-matched popularity only—this scatter may impute missing tokens (tooltips flag it).</p>
+                                    <details class="chart-methodology-details">
+                                        <summary>Axis &amp; data details</summary>
+                                        <div class="methodology-content">
+                                            <p><strong>X</strong> starts from <code>Popularity_Index</code> when present: a weighted blend of <strong>Google Trends</strong> (<code>Trend_Index_Average</code>) with survey signal from <strong>multi-poll adjusted ranks</strong> plus <strong>Sparklez 2025</strong> vote totals (synthetic rank on the same ~45–100 scale), combined before mapping to the chart axis (see <code>species_popularity_build_meta.json</code> for source URLs). Averaged across <strong>base species</strong> tokens (same stripping as the character chart). Items and trainers with no species row keep Trends-only values. Names with <strong>no token match</strong> still plot using a small <strong>imputed</strong> baseline; tooltips flag imputed points. The composite uses <strong>matched-file</strong> popularity only (no imputation). The scatter then applies the graded nudges described in the regression footnotes. <strong>Y</strong> is chart market price ($).</p>
+                                        </div>
+                                    </details>
+                                </div>
+                            </div>
+                            <div class="chart-canvas-container">
+                                <canvas id="trendsChart"></canvas>
+                            </div>
+                            <div class="chart-axis-panel">
+                                <label class="chart-lsrl-toggle">
+                                    <input type="checkbox" class="lsrl-toggle" data-chart="trends" checked />
+                                    <span>Show LSRL</span>
+                                </label>
+                                <div class="chart-stats-below" data-stats-for="trends">
+                                    <div class="stats-equation-box stats-below-equation">
+                                        <div class="stats-label">Weighted linear regression (y on x)</div>
+                                        <div class="stats-equation stats-equation-below" data-field="eq">—</div>
+                                    </div>
+                                    <div class="stats-metrics-grid stats-metrics-below">
+                                        <div class="stat-box">
+                                            <div class="stats-label">Correlation (r)</div>
+                                            <div class="stats-value" data-field="r">—</div>
+                                        </div>
+                                        <div class="stat-box">
+                                            <div class="stats-label">R²</div>
+                                            <div class="stats-value" data-field="r2">—</div>
+                                        </div>
+                                        <div class="stat-box">
+                                            <div class="stats-label">Slope (m)</div>
+                                            <div class="stats-value" data-field="m">—</div>
+                                        </div>
+                                        <div class="stat-box">
+                                            <div class="stats-label">Points (n)</div>
+                                            <div class="stats-value" data-field="n">0</div>
+                                        </div>
+                                    </div>
+                                    <details class="stats-insight stats-insight-below stats-insight-details">
+                                        <summary class="stats-insight-summary">Regression insight</summary>
+                                        <div class="stats-insight-body" data-field="insight"></div>
+                                    </details>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="chart-quadrant chart-quadrant--compact" id="quadrant-rarity-tier" data-chart-key="rarityTier">
+                            <div class="chart-header">
+                                <h3 class="chart-title">Print class vs. price</h3>
+                                <div class="chart-variable-desc">
+                                    <p><strong>X</strong> is a collector print-class ordinal from listed <code>rarity</code>; <strong>Y</strong> is market price ($). Separate from pull-math weights.</p>
+                                    <details class="chart-methodology-details">
+                                        <summary>Axis &amp; data details</summary>
+                                        <div class="methodology-content">
+                                            <p><strong>X</strong> is an ordinal <strong>collector print-class score</strong> from the card’s listed <code>rarity</code> (SIR, IR, UR, holo, etc.)—the same heuristic ladder used for LSRL point weights, shown here as a browsing axis <em>separate from</em> pull-math. <strong>Y</strong> is market price ($).</p>
+                                        </div>
+                                    </details>
+                                </div>
+                            </div>
+                            <div class="chart-canvas-container">
+                                <canvas id="rarityTierChart"></canvas>
+                            </div>
+                            <div class="chart-axis-panel">
+                                <label class="chart-lsrl-toggle">
+                                    <input type="checkbox" class="lsrl-toggle" data-chart="rarityTier" checked />
+                                    <span>Show LSRL</span>
+                                </label>
+                                <div class="chart-stats-below" data-stats-for="rarityTier">
+                                    <div class="stats-equation-box stats-below-equation">
+                                        <div class="stats-label">Weighted linear regression (y on x)</div>
+                                        <div class="stats-equation stats-equation-below" data-field="eq">—</div>
+                                    </div>
+                                    <div class="stats-metrics-grid stats-metrics-below">
+                                        <div class="stat-box">
+                                            <div class="stats-label">Correlation (r)</div>
+                                            <div class="stats-value" data-field="r">—</div>
+                                        </div>
+                                        <div class="stat-box">
+                                            <div class="stats-label">R²</div>
+                                            <div class="stats-value" data-field="r2">—</div>
+                                        </div>
+                                        <div class="stat-box">
+                                            <div class="stats-label">Slope (m)</div>
+                                            <div class="stats-value" data-field="m">—</div>
+                                        </div>
+                                        <div class="stat-box">
+                                            <div class="stats-label">Points (n)</div>
+                                            <div class="stats-value" data-field="n">0</div>
+                                        </div>
+                                    </div>
+                                    <details class="stats-insight stats-insight-below stats-insight-details">
+                                        <summary class="stats-insight-summary">Regression insight</summary>
+                                        <div class="stats-insight-body" data-field="insight"></div>
+                                    </details>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="chart-quadrant chart-quadrant--compact" id="quadrant-set-vintage" data-chart-key="setVintage">
+                            <div class="chart-header">
+                                <h3 class="chart-title">Set age vs. price</h3>
+                                <div class="chart-variable-desc">
+                                    <p><strong>X</strong> is sqrt-capped set age from <code>release_date</code> (shared per set); <strong>Y</strong> is market price ($).</p>
+                                    <details class="chart-methodology-details">
+                                        <summary>Axis &amp; data details</summary>
+                                        <div class="methodology-content">
+                                            <p><strong>X</strong> is <strong>sqrt-scaled capped</strong> set age: sqrt(min(years since <code>release_date</code>, 28)) ÷ sqrt(28) so recent product gets more horizontal spread and 1990s–2000s vintage does not stretch the axis alone. Tooltips show raw years. Fixed reference date (UTC). Every card from the same set shares the same X—<strong>vintage / era</strong> context. <strong>Y</strong> is market price ($). Pooling many eras often yields a <em>weak</em> linear r; that is expected.</p>
+                                        </div>
+                                    </details>
+                                </div>
+                            </div>
+                            <div class="chart-canvas-container">
+                                <canvas id="setVintageChart"></canvas>
+                            </div>
+                            <div class="chart-axis-panel">
+                                <label class="chart-lsrl-toggle">
+                                    <input type="checkbox" class="lsrl-toggle" data-chart="setVintage" checked />
+                                    <span>Show LSRL</span>
+                                </label>
+                                <div class="chart-stats-below" data-stats-for="setVintage">
+                                    <div class="stats-equation-box stats-below-equation">
+                                        <div class="stats-label">Weighted linear regression (y on x)</div>
+                                        <div class="stats-equation stats-equation-below" data-field="eq">—</div>
+                                    </div>
+                                    <div class="stats-metrics-grid stats-metrics-below">
+                                        <div class="stat-box">
+                                            <div class="stats-label">Correlation (r)</div>
+                                            <div class="stats-value" data-field="r">—</div>
+                                        </div>
+                                        <div class="stat-box">
+                                            <div class="stats-label">R²</div>
+                                            <div class="stats-value" data-field="r2">—</div>
+                                        </div>
+                                        <div class="stat-box">
+                                            <div class="stats-label">Slope (m)</div>
+                                            <div class="stats-value" data-field="m">—</div>
+                                        </div>
+                                        <div class="stat-box">
+                                            <div class="stats-label">Points (n)</div>
+                                            <div class="stats-value" data-field="n">0</div>
+                                        </div>
+                                    </div>
+                                    <details class="stats-insight stats-insight-below stats-insight-details">
+                                        <summary class="stats-insight-summary">Regression insight</summary>
+                                        <div class="stats-insight-body" data-field="insight"></div>
+                                    </details>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="chart-quadrant chart-quadrant--compact" id="quadrant-tcg-macro-interest" data-chart-key="tcgMacroInterest">
+                            <div class="chart-header">
+                                <h3 class="chart-title">TCG-wide interest (release year) vs. price</h3>
+                                <div class="chart-variable-desc">
+                                    <p><strong>X</strong> is hobby-wide interest by set <strong>release calendar year</strong> (<code>tcg_macro_interest_by_year.json</code>); <strong>Y</strong> is market price ($). Not per-species Trends.</p>
+                                    <details class="chart-methodology-details">
+                                        <summary>Axis &amp; data details</summary>
+                                        <div class="methodology-content">
+                                            <p><strong>X</strong> is a <strong>hobby-wide interest index</strong> for the set’s <strong>calendar release year</strong> (from <code>tcg_macro_interest_by_year.json</code>) — e.g. annual <strong>Google Trends</strong> means for “pokemon tcg” / “pokemon cards,” <em>not</em> per-species Trends. Every card from the same set shares the same X. <strong>Y</strong> is market price ($). Use it to compare eras (e.g. <strong>Skyridge</strong>, 2003) against today’s prices; confounders include print runs, English share, grade supply, and this scrape’s top-card selection. Run <code>python scrape/seed_tcg_macro_interest_years.py</code> then replace <code>null</code> values in <code>by_year</code> with numbers from your Trends export.</p>
+                                        </div>
+                                    </details>
+                                </div>
+                            </div>
+                            <div class="chart-canvas-container">
+                                <canvas id="tcgMacroInterestChart"></canvas>
+                            </div>
+                            <div class="chart-axis-panel">
+                                <label class="chart-lsrl-toggle">
+                                    <input type="checkbox" class="lsrl-toggle" data-chart="tcgMacroInterest" checked />
+                                    <span>Show LSRL</span>
+                                </label>
+                                <div class="chart-stats-below" data-stats-for="tcgMacroInterest">
+                                    <div class="stats-equation-box stats-below-equation">
+                                        <div class="stats-label">Weighted linear regression (y on x)</div>
+                                        <div class="stats-equation stats-equation-below" data-field="eq">—</div>
+                                    </div>
+                                    <div class="stats-metrics-grid stats-metrics-below">
+                                        <div class="stat-box">
+                                            <div class="stats-label">Correlation (r)</div>
+                                            <div class="stats-value" data-field="r">—</div>
+                                        </div>
+                                        <div class="stat-box">
+                                            <div class="stats-label">R²</div>
+                                            <div class="stats-value" data-field="r2">—</div>
+                                        </div>
+                                        <div class="stat-box">
+                                            <div class="stats-label">Slope (m)</div>
+                                            <div class="stats-value" data-field="m">—</div>
+                                        </div>
+                                        <div class="stat-box">
+                                            <div class="stats-label">Points (n)</div>
+                                            <div class="stats-value" data-field="n">0</div>
+                                        </div>
+                                    </div>
+                                    <details class="stats-insight stats-insight-below stats-insight-details">
+                                        <summary class="stats-insight-summary">Regression insight</summary>
+                                        <div class="stats-insight-body" data-field="insight"></div>
+                                    </details>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="chart-quadrant chart-quadrant--compact" id="quadrant-graded-pop" data-chart-key="gradedPop">
+                            <div class="chart-header">
+                                <h3 class="chart-title">Graded population vs. chart market price</h3>
+                                <div class="chart-variable-desc">
+                                    <p><strong>X</strong> is log₁₀(1 + graded total) (Gemrate / sidecar). <strong>Y</strong> is chart market price ($). High counts often track liquidity; low counts vs modern-era pools (see hype×scarcity) can read as relative scarcity.</p>
+                                    <details class="chart-methodology-details">
+                                        <summary>Axis &amp; data details</summary>
+                                        <div class="methodology-content">
+                                            <p><strong>X</strong> is <strong>log₁₀(1 + total PSA-style graded count)</strong> from Gemrate Universal Pop (or sidecar totals from <code>graded_population_merge.py</code>). <strong>Y</strong> is chart market price ($). Trainer Gallery / shiny-vault style lists often share the main expansion slug in the merge—read tooltips for source and slug.</p>
+                                        </div>
+                                    </details>
+                                </div>
+                                <p id="gradedPopScatterFrameMeta" class="chart-scatter-frame-meta" aria-live="polite"></p>
+                            </div>
+                            <div class="chart-canvas-container">
+                                <canvas id="gradedPopChart"></canvas>
+                            </div>
+                            <div class="chart-axis-panel">
+                                <label class="chart-lsrl-toggle">
+                                    <input type="checkbox" class="lsrl-toggle" data-chart="gradedPop" checked />
+                                    <span>Show LSRL</span>
+                                </label>
+                                <div class="chart-stats-below" data-stats-for="gradedPop">
+                                    <div class="stats-equation-box stats-below-equation">
+                                        <div class="stats-label">Weighted linear regression (y on x)</div>
+                                        <div class="stats-equation stats-equation-below" data-field="eq">—</div>
+                                    </div>
+                                    <div class="stats-metrics-grid stats-metrics-below">
+                                        <div class="stat-box">
+                                            <div class="stats-label">Correlation (r)</div>
+                                            <div class="stats-value" data-field="r">—</div>
+                                        </div>
+                                        <div class="stat-box">
+                                            <div class="stats-label">R²</div>
+                                            <div class="stats-value" data-field="r2">—</div>
+                                        </div>
+                                        <div class="stat-box">
+                                            <div class="stats-label">Slope (m)</div>
+                                            <div class="stats-value" data-field="m">—</div>
+                                        </div>
+                                        <div class="stat-box">
+                                            <div class="stats-label">Points (n)</div>
+                                            <div class="stats-value" data-field="n">0</div>
+                                        </div>
+                                    </div>
+                                    <details class="stats-insight stats-insight-below stats-insight-details">
+                                        <summary class="stats-insight-summary">Regression insight</summary>
+                                        <div class="stats-insight-body" data-field="insight"></div>
+                                    </details>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="chart-quadrant chart-quadrant--compact" id="quadrant-hype-scarcity" data-chart-key="hypeScarcity">
+                            <div class="chart-header">
+                                <h3 class="chart-title">Hype × scarcity vs. chart market price</h3>
+                                <div class="chart-variable-desc">
+                                    <p><strong>X</strong> is the same blended popularity as the Trends chart × a scarcity term: <strong>log₁₀(effective pull + 1)</strong> plus adjustments when this card’s graded count is low vs <strong>set peers</strong> and vs a <strong>modern-era</strong> slab median from the current selection (release year ≥ 2015 or ≤12y old). <strong>Y</strong> is chart market price ($).</p>
+                                    <details class="chart-methodology-details">
+                                        <summary>Method details</summary>
+                                        <div class="methodology-content">
+                                            <p>This index combines interest (search + slab-informed popularity) with modeled pull difficulty and slab density. Fewer grades than a typical modern English chase in your sample reads as extra scarcity alongside a hard pull—use it as an exploratory “chase” axis, not a causal model.</p>
+                                        </div>
+                                    </details>
+                                </div>
+                            </div>
+                            <div class="chart-canvas-container">
+                                <canvas id="hypeScarcityChart"></canvas>
+                            </div>
+                            <div class="chart-axis-panel">
+                                <label class="chart-lsrl-toggle">
+                                    <input type="checkbox" class="lsrl-toggle" data-chart="hypeScarcity" checked />
+                                    <span>Show LSRL</span>
+                                </label>
+                                <div class="chart-stats-below" data-stats-for="hypeScarcity">
+                                    <div class="stats-equation-box stats-below-equation">
+                                        <div class="stats-label">Weighted linear regression (y on x)</div>
+                                        <div class="stats-equation stats-equation-below" data-field="eq">—</div>
+                                    </div>
+                                    <div class="stats-metrics-grid stats-metrics-below">
+                                        <div class="stat-box">
+                                            <div class="stats-label">Correlation (r)</div>
+                                            <div class="stats-value" data-field="r">—</div>
+                                        </div>
+                                        <div class="stat-box">
+                                            <div class="stats-label">R²</div>
+                                            <div class="stats-value" data-field="r2">—</div>
+                                        </div>
+                                        <div class="stat-box">
+                                            <div class="stats-label">Slope (m)</div>
+                                            <div class="stats-value" data-field="m">—</div>
+                                        </div>
+                                        <div class="stat-box">
+                                            <div class="stats-label">Points (n)</div>
+                                            <div class="stats-value" data-field="n">0</div>
+                                        </div>
+                                    </div>
+                                    <details class="stats-insight stats-insight-below stats-insight-details">
+                                        <summary class="stats-insight-summary">Regression insight</summary>
+                                        <div class="stats-insight-body" data-field="insight"></div>
+                                    </details>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="chart-quadrant chart-quadrant--compact" id="quadrant-hype-pull-ratio" data-chart-key="hypePullRatio">
+                            <div class="chart-header">
+                                <h3 class="chart-title">Popularity ÷ pull gap vs. chart market price</h3>
+                                <div class="chart-variable-desc">
+                                    <p><strong>X</strong> is the same slab-adjusted popularity as the Trends chart <strong>divided by</strong> ln(effective pull + 1). <strong>Y</strong> is chart market price ($).</p>
+                                    <details class="chart-methodology-details">
+                                        <summary>Method details</summary>
+                                        <div class="methodology-content">
+                                            <p>This ratio measures blended interest per unit of pull difficulty (natural log of pull dollars + 1). It uses the same popularity numerator as the Trends scatter so graded population nudges the gap.</p>
+                                        </div>
+                                    </details>
+                                </div>
+                            </div>
+                            <div class="chart-canvas-container">
+                                <canvas id="hypePullRatioChart"></canvas>
+                            </div>
+                            <div class="chart-axis-panel">
+                                <label class="chart-lsrl-toggle">
+                                    <input type="checkbox" class="lsrl-toggle" data-chart="hypePullRatio" checked />
+                                    <span>Show LSRL</span>
+                                </label>
+                                <div class="chart-stats-below" data-stats-for="hypePullRatio">
+                                    <div class="stats-equation-box stats-below-equation">
+                                        <div class="stats-label">Weighted linear regression (y on x)</div>
+                                        <div class="stats-equation stats-equation-below" data-field="eq">—</div>
+                                    </div>
+                                    <div class="stats-metrics-grid stats-metrics-below">
+                                        <div class="stat-box">
+                                            <div class="stats-label">Correlation (r)</div>
+                                            <div class="stats-value" data-field="r">—</div>
+                                        </div>
+                                        <div class="stat-box">
+                                            <div class="stats-label">R²</div>
+                                            <div class="stats-value" data-field="r2">—</div>
+                                        </div>
+                                        <div class="stat-box">
+                                            <div class="stats-label">Slope (m)</div>
+                                            <div class="stats-value" data-field="m">—</div>
+                                        </div>
+                                        <div class="stat-box">
+                                            <div class="stats-label">Points (n)</div>
+                                            <div class="stats-value" data-field="n">0</div>
+                                        </div>
+                                    </div>
+                                    <details class="stats-insight stats-insight-below stats-insight-details">
+                                        <summary class="stats-insight-summary">Regression insight</summary>
+                                        <div class="stats-insight-body" data-field="insight"></div>
+                                    </details>
+                                </div>
+                            </div>
+                        </div>
+                        </details>
+
+                        <details class="analytics-docs-drawer">
+                            <summary class="analytics-docs-drawer-summary">Reference: limits, species list &amp; methodology</summary>
+                            <div class="analytics-docs-drawer-body">
+                                <div class="analytics-info-tabs">
+                                    <details class="analytics-limits">
+                                        <summary>Limits of this view</summary>
+                                        <div class="analytics-limits-body">
+                                            <p>These charts are <strong>exploratory</strong>: LSRL and correlations describe association in the current sample, not causation. By default the sample is <strong>top-list English-centric</strong> listings with <strong>sub-$5</strong> prices included (toggle under <strong>Data, filters &amp; tools</strong> to require market price ≥ $5 only). Cards with <strong>no</strong> positive list / Dex / Track USD are always omitted from scatters. Mixed sets, rarity skew, possible reprints, and selection effects mean out-of-sample prices are not “predicted” here. <strong>Base Set (base1) Charizard</strong> is excluded from every scatter and from character-volume calibration — one legacy listing otherwise dominates log-price fits.</p>
+                                            <p>Pull costs blend card and slot odds with set <code>rarity_counts</code>; the <strong>popularity index</strong> (Google Trends plus multi-poll survey ranks in <code>google_trends_momentum.json</code>, rebuilt via <code>scrape/build_species_popularity_index.py</code>) and character volume use <strong>base species keys</strong> (Mega / regional forms stripped) to match your JSON files; the <strong>TCG-wide interest</strong> panel uses a separate <code>tcg_macro_interest_by_year.json</code> hobby index keyed by <strong>set release calendar year</strong> (macro Trends-style series you supply — not per-card species). The print-class chart maps listed <code>rarity</code> to a collector ordinal; set age uses a <strong>sqrt-capped</strong> transform of years from <code>release_date</code>; the illustrator chart uses global chase medians from <code>artist_scores.json</code>; the <strong>graded population</strong> chart plots log₁₀(1 + total graded) vs price (Gemrate analytics). After a <strong>scraper</strong> refresh, tooltips can show <strong>promo / subset-reprint</strong> heuristics, the <strong>Dex variant</strong> that set chart price, and <strong>regulation mark</strong> when present. <strong>Gemrate</strong> population (Universal Pop totals + PSD/BGS/CGC gem counts) is fetched via <code>gemrate_scraper.py</code> using the advanced REST endpoint routing. Hover tooltips name the <strong>set</strong> for each point and show how far it sits <strong>above or below</strong> the weighted LSRL on that chart’s axes (composite: <strong>log₁₀(price)</strong> vs X).</p>
+                                        </div>
+                                    </details>
+                                    <details class="analytics-popularity-list" id="analyticsSpeciesPopularity">
+                                        <summary>Species popularity (market list)</summary>
+                                        <div class="analytics-popularity-body">
+                                            <p class="analytics-popularity-intro">
+                                                Full union of <strong>Sparklez 2025</strong> votes (variants summed to base species), <strong>multi-poll adjusted ranks</strong>, and <strong>Google Trends</strong> where the species appears in <code>google_trends_momentum.json</code>.
+                                                Rows without a Trends row use the file’s <strong>median Trend</strong> only for this table’s sort score (not for card scatters). Rebuild: <code>python scrape/build_species_popularity_index.py</code> → <code>species_popularity_list.json</code>.
+                                            </p>
+                                            <p id="speciesPopularityMeta" class="analytics-popularity-meta" aria-live="polite"></p>
+                                            <div class="analytics-popularity-controls">
+                                                <label class="analytics-field-label" for="speciesPopularityFilter">Filter species</label>
+                                                <input type="search" id="speciesPopularityFilter" class="filter-select analytics-popularity-filter" placeholder="Name contains…" autocomplete="off" />
+                                            </div>
+                                            <div class="analytics-popularity-table-wrap">
+                                                <table class="analytics-popularity-table">
+                                                    <thead>
+                                                        <tr>
+                                                            <th scope="col">#</th>
+                                                            <th scope="col">Species</th>
+                                                            <th scope="col">Pop. idx</th>
+                                                            <th scope="col">Trends</th>
+                                                            <th scope="col">Panel adj.</th>
+                                                            <th scope="col">Sparklez votes</th>
+                                                            <th scope="col">In TCG trends file</th>
+                                                        </tr>
+                                                    </thead>
+                                                    <tbody id="speciesPopularityTbody"></tbody>
+                                                </table>
+                                            </div>
+                                        </div>
+                                    </details>
+                                </div>
+
+                                <section class="analytics-methodology-section">
+                                    <h2 class="methodology-title">Methodology &amp; data sources</h2>
+                                    <div class="methodology-grid">
+                                        <div class="methodology-card">
+                                            <div class="methodology-card-header">
+                                                <span class="methodology-icon">∑</span>
+                                                <h3>Composite core (r-max)</h3>
+                                            </div>
+                                            <p>The composite index is a dynamic regression engine that picks the best-performing price drivers for the currently selected sets. Drivers are z-scored and blended based on their individual Pearson correlation (r) to log₁₀(price).</p>
+                                        </div>
+                                        <div class="methodology-card">
+                                            <div class="methodology-card-header">
+                                                <span class="methodology-icon">⇄</span>
+                                                <h3>Pricing &amp; volume</h3>
+                                            </div>
+                                            <p>Market prices are NM/EN medians from TCGTracking and PriceDex. Character volume and species popularity are derived from aggregated catalog search and global graded population files.</p>
+                                        </div>
+                                        <div class="methodology-card">
+                                            <div class="methodology-card-header">
+                                                <span class="methodology-icon">⚠</span>
+                                                <h3>Exclusions</h3>
+                                            </div>
+                                            <p>Listings <strong>under $5</strong> are <strong>included by default</strong> (toggle in <strong>Data, filters &amp; tools</strong> to require ≥ $5 only). The 1999 Base Set Charizard (extreme outlier) stays excluded from every scatter and character-volume calibration.</p>
+                                        </div>
+                                    </div>
+                                </section>
+                            </div>
+                        </details>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="supabase-config.js"></script>
+    <script src="shared.js?v=35"></script>
+    <script src="analytics.js?v=84"></script>
+</body>
+</html>

@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Cache-Control" content="no-cache">
+    <link rel="icon" href="favicon.svg" type="image/svg+xml">
+    <title>Pokémon TCG Set Explorer</title>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css?v=32">
+
+</head>
+<body>
+    <div class="glass-bg"></div>
+    <div class="container">
+        <header>
+            <h1>Pokémon TCG Set Explorer</h1>
+            <p>Explore expected values, pack data, and the most expensive cards from every set.</p>
+            <nav class="main-nav">
+                <a href="predictor.html" class="nav-link">Predictor</a>
+                <a href="analytics.html" class="nav-link">Analytics</a>
+                <a href="index.html" class="nav-link active">Explorer</a>
+
+            </nav>
+            <div class="search-container">
+                <select id="seriesFilter" class="filter-select">
+                    <option value="">All Series</option>
+                </select>
+                <input type="text" id="searchInput" placeholder="Search for a set...">
+            </div>
+        </header>
+        
+        <div id="loading" class="loading">
+            <div class="spinner"></div>
+            <p>Loading dataset...</p>
+        </div>
+
+        <div id="sets-container" class="sets-container">
+            <!-- Accordions injected via JS -->
+        </div>
+    </div>
+
+    <div id="imageModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="cardDetailTitle">
+        <div class="modal-content modal-content--card-detail">
+            <span class="close-btn" id="closeModal" aria-label="Close">&times;</span>
+            <div class="card-detail-layout">
+                <div class="card-detail-visual">
+                    <img id="modalImage" src="" alt="">
+                </div>
+                <div class="card-detail-panel custom-scrollbar" id="modalCardPanel"></div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" crossorigin="anonymous"></script>
+    <script src="supabase-config.js"></script>
+    <script src="shared.js?v=35"></script>
+    <script src="app.js?v=17"></script>
+</body>
+</html>
