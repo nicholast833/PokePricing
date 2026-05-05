@@ -71,8 +71,12 @@ def run_queue():
     from tcggo_api_fetcher import fetch_tcggo_price_history, extract_latest_market_price
     from ebay_api_fetcher import fetch_ebay_sold_listings
     
-    tcgpro_key = os.environ.get("TCGPRO_API_KEY")
+    # Check multiple possible environment variable names for the API key
+    tcgpro_key = os.environ.get("TCGPRO_API_KEY") or os.environ.get("RAPIDAPI_KEY_TCGGO") or os.environ.get("RAPIDAPI_KEY")
     ebay_app_id = os.environ.get("EBAY_APP_ID")
+    
+    if not tcgpro_key:
+        logging.warning("WARNING: No TCGPRO_API_KEY found in environment variables! TCGGO data will be skipped.")
     
     for index, card in enumerate(cards):
         card_id = card['unique_card_id']
