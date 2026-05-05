@@ -35,7 +35,7 @@ logging.basicConfig(
     ]
 )
 
-BATCH_SIZE = 1150
+BATCH_SIZE = 800  # 2 TCGGO calls + 1 eBay call per card = ~2400 TCGGO calls at 800 cards
 
 def run_queue():
     logging.info("==========================================")
@@ -68,7 +68,7 @@ def run_queue():
     error_count = 0
     
     # 2. Process each card
-    from tcggo_api_fetcher import fetch_tcggo_price_history, extract_latest_market_price
+    from tcggo_api_fetcher import fetch_tcggo_price_history, extract_latest_market_price, extract_full_price_history, fetch_tcggo_ebay_sold
     from ebay_api_fetcher import fetch_ebay_sold_listings
     
     # Check multiple possible environment variable names for the API key
@@ -92,54 +92,68 @@ def run_queue():
             updates_made = False
             today_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
             
-            # --- 1. TCGGO API (TCGPro) ---
+            # --- 1. TCGGO Price History API ---
             tcggo_id = metrics.get('tcggo_id')
             if tcggo_id and tcgpro_key:
                 logging.info(f"  -> Fetching TCGGO history for tcggo_id={tcggo_id}")
                 try:
-                    tcg_data = fetch_tcggo_price_history(tcggo_id, tcgpro_key, days=2)
-                    latest_market = extract_latest_market_price(tcg_data)
+                    tcg_data = fetch_tcggo_price_history(tcggo_id, tcgpro_key, days=730)
                     
+                    # Save full history
+                    full_history = extract_full_price_history(tcg_data)
+                    if full_history:
+                        price_history['tcggo_market_history'] = full_history
+                        updates_made = True
+                        logging.info(f"  -> TCGGO: {len(full_history)} price data points saved")
+                    
+                    # Extract latest market price for quick reference
+                    latest_market = extract_latest_market_price(tcg_data)
                     if latest_market:
-                        logging.info(f"  -> TCGGO Market Price: ${latest_market}")
-                        if 'tcggo_market_history' not in price_history:
-                            price_history['tcggo_market_history'] = []
-                            
-                        # Prevent duplicates for today
-                        history_list = [h for h in price_history['tcggo_market_history'] if h.get('date') != today_iso]
-                        history_list.append({"date": today_iso, "price_usd": float(latest_market)})
-                        price_history['tcggo_market_history'] = sorted(history_list, key=lambda x: x['date'])
+                        logging.info(f"  -> TCGGO Latest Market Price: ${latest_market}")
+                        metrics['tcggo_latest_market_usd'] = latest_market
+                    else:
+                        data_keys = list((tcg_data or {}).get('data', {}).keys())[:3]
+                        logging.warning(f"  -> TCGGO returned data (sample dates: {data_keys}) but no valid tcg_player_market found")
+                        
+                except Exception as e:
+                    logging.error(f"  -> TCGGO History API Failed: {e}")
+                
+                # --- 2. TCGGO eBay Sold Prices ---
+                try:
+                    logging.info(f"  -> Fetching TCGGO eBay sold prices for tcggo_id={tcggo_id}")
+                    ebay_sold = fetch_tcggo_ebay_sold(tcggo_id, tcgpro_key)
+                    sold_data = ebay_sold.get('data', []) if ebay_sold else []
+                    
+                    if sold_data:
+                        logging.info(f"  -> TCGGO eBay: {len(sold_data)} grading entries found")
+                        metrics['tcggo_ebay_sold_prices'] = sold_data
+                        metrics['tcggo_ebay_sold_sync_iso'] = today_iso
                         updates_made = True
                     else:
-                        # Log what the API actually returned so we can debug
-                        data_keys = list((tcg_data or {}).get('data', {}).keys())[:3]
-                        logging.warning(f"  -> TCGGO returned data (dates: {data_keys}) but tcg_player_market was null/missing")
+                        logging.info(f"  -> TCGGO eBay: No graded sold data available")
                 except Exception as e:
-                    logging.error(f"  -> TCGGO API Failed: {e}")
+                    logging.error(f"  -> TCGGO eBay Sold API Failed: {e}")
             else:
                 if not tcggo_id:
                     logging.info("  -> Skipping TCGGO: No tcggo_id found in metrics.")
                 elif not tcgpro_key:
                     logging.error("  -> Skipping TCGGO: TCGPRO_API_KEY is empty or missing from environment!")
 
-            # --- 2. eBay Finding API ---
+            # --- 3. eBay Finding API (fallback for raw sold listings) ---
             if ebay_app_id:
-                # Better search query than just raw set_code
                 number_str = f" {card.get('number', '')}" if card.get('number') else ""
                 query = f"{name}{number_str} pokemon"
-                logging.info(f"  -> Fetching eBay sold history for '{query}'")
-                sales = fetch_ebay_sold_listings(query, ebay_app_id, days=14)
+                logging.info(f"  -> Fetching eBay Finding API for '{query}'")
+                sales = fetch_ebay_sold_listings(query, ebay_app_id, days=30)
                 
                 if sales['graded'] or sales['ungraded']:
-                    logging.info(f"  -> Found {len(sales['graded'])} graded, {len(sales['ungraded'])} ungraded sales.")
+                    logging.info(f"  -> eBay Finding: {len(sales['graded'])} graded, {len(sales['ungraded'])} ungraded sales.")
                     metrics['ebay_sold_history_graded'] = sales['graded']
                     metrics['ebay_sold_history_ungraded'] = sales['ungraded']
                     metrics['ebay_sold_sync_iso'] = today_iso
                     updates_made = True
                 else:
-                    logging.warning(f"  -> eBay returned 0 sold listings for '{query}'")
-            else:
-                logging.warning("  -> Skipping eBay: No EBAY_APP_ID found in environment!")
+                    logging.info(f"  -> eBay Finding: 0 sold listings for '{query}'")
 
             # --- 3. Update Supabase ---
             current_time = datetime.datetime.now(datetime.timezone.utc).isoformat()
