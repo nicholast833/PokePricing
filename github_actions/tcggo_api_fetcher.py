@@ -33,7 +33,7 @@ def fetch_tcggo_price_history(tcgplayer_id: int, api_key: str, days: int = 31) -
         "date_to": end.isoformat(),
         "page": "1",
         "sort": "desc",
-        "tcgplayer_id": str(tcgplayer_id)
+        "tcgid": str(tcgplayer_id)
     }
     
     headers, query_params = tcggo_gateway_headers_query(api_key, q)
