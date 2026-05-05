@@ -47,7 +47,7 @@ def run_queue():
     # Order by last_synced_at ascending. Nulls first means cards never synced go first.
     try:
         response = supabase.table('pokemon_cards') \
-            .select('unique_card_id, set_code, name, last_synced_at') \
+            .select('unique_card_id, set_code, name, number, metrics, price_history, last_synced_at') \
             .order('last_synced_at', nullsfirst=True) \
             .limit(BATCH_SIZE) \
             .execute()
@@ -120,8 +120,9 @@ def run_queue():
 
             # --- 2. eBay Finding API ---
             if ebay_app_id:
-                # Build a simple search query (e.g. "Base Set Alakazam 1/102")
-                query = f"{set_code} {name}" # Simplified for this example
+                # Better search query than just raw set_code
+                number_str = f" {card.get('number', '')}" if card.get('number') else ""
+                query = f"{name}{number_str} pokemon"
                 logging.info(f"  -> Fetching eBay sold history for '{query}'")
                 sales = fetch_ebay_sold_listings(query, ebay_app_id, days=14)
                 
