@@ -62,23 +62,32 @@ def run_backfill():
     sets_response = supabase.table('pokemon_sets').select('set_code, set_name').execute()
     set_name_map = {s['set_code']: s['set_name'] for s in sets_response.data}
 
-    # 3. Fetch Cards missing IDs
-    print("Fetching cards from Supabase...")
-    cards_response = supabase.table('pokemon_cards').select('unique_card_id, set_code, name, number, metrics').execute()
-    cards = cards_response.data
+    # 3. Fetch Cards missing TCGGO IDs
+    print("Fetching all cards from Supabase...")
+    all_cards = []
+    limit = 1000
+    offset = 0
+
+    while True:
+        res = supabase.table('pokemon_cards').select('unique_card_id, set_code, name, number, metrics').range(offset, offset + limit - 1).execute()
+        data = res.data
+        all_cards.extend(data)
+        if len(data) < limit:
+            break
+        offset += limit
 
     missing_cards = []
-    for c in cards:
+    for c in all_cards:
         metrics = c.get('metrics') or {}
-        if not metrics.get('tcgtracking_product_id'):
+        if not metrics.get('tcggo_id'):
             missing_cards.append(c)
 
-    print(f"Found {len(missing_cards)} cards missing TCGTracking/TCGPlayer Product IDs.")
+    print(f"Found {len(missing_cards)} cards missing TCGGO internal IDs out of {len(all_cards)}.")
 
     # 4. Process matches
     episode_cache = {}
     matched_updates = []
-
+    
     for idx, card in enumerate(missing_cards):
         set_name = set_name_map.get(card['set_code'], card['set_code'])
         norm_set = norm_str(set_name)
@@ -118,17 +127,22 @@ def run_backfill():
                 break
                 
         if match:
-            tcg_id = match.get('tcgplayer_id')
-            if tcg_id:
-                print(f"[{idx}] MATCHED: {card['name']} -> TCGPlayer ID: {tcg_id}")
+            tcggo_id = match.get('id')
+            if tcggo_id:
+                print(f"[{idx}] MATCHED: {card['name']} -> TCGGO ID: {tcggo_id}")
                 metrics = card.get('metrics') or {}
-                metrics['tcgtracking_product_id'] = tcg_id
+                metrics['tcggo_id'] = tcggo_id
+                
+                # Also ensure tcgtracking_product_id is saved if it's missing
+                if not metrics.get('tcgtracking_product_id') and match.get('tcgplayer_id'):
+                    metrics['tcgtracking_product_id'] = match.get('tcgplayer_id')
+                    
                 matched_updates.append({
                     'unique_card_id': card['unique_card_id'],
                     'metrics': metrics
                 })
             else:
-                print(f"[{idx}] Matched {card['name']}, but API card has no tcgplayer_id")
+                print(f"[{idx}] Matched {card['name']}, but API card has no TCGGO ID")
         else:
             print(f"[{idx}] No card match found for {card['name']} #{card['number']} in episode")
 

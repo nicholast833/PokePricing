@@ -93,11 +93,11 @@ def run_queue():
             today_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
             
             # --- 1. TCGGO API (TCGPro) ---
-            tcgplayer_id = metrics.get('tcgtracking_product_id')
-            if tcgplayer_id and tcgpro_key:
-                logging.info(f"  -> Fetching TCGGO history for tcgplayer_id={tcgplayer_id}")
+            tcggo_id = metrics.get('tcggo_id')
+            if tcggo_id and tcgpro_key:
+                logging.info(f"  -> Fetching TCGGO history for tcggo_id={tcggo_id}")
                 try:
-                    tcg_data = fetch_tcggo_price_history(tcgplayer_id, tcgpro_key, days=2)
+                    tcg_data = fetch_tcggo_price_history(tcggo_id, tcgpro_key, days=2)
                     latest_market = extract_latest_market_price(tcg_data)
                     
                     if latest_market:
@@ -113,8 +113,8 @@ def run_queue():
                 except Exception as e:
                     logging.error(f"  -> TCGGO API Failed: {e}")
             else:
-                if not tcgplayer_id:
-                    logging.info("  -> Skipping TCGGO: No tcgtracking_product_id found in metrics.")
+                if not tcggo_id:
+                    logging.info("  -> Skipping TCGGO: No tcggo_id found in metrics.")
                 elif not tcgpro_key:
                     logging.error("  -> Skipping TCGGO: TCGPRO_API_KEY is empty or missing from environment!")
 

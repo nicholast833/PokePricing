@@ -21,9 +21,9 @@ def tcggo_gateway_headers_query(key: str, query: Dict[str, str]) -> tuple[Dict[s
         
     return headers, params
 
-def fetch_tcggo_price_history(tcgplayer_id: int, api_key: str, days: int = 31) -> Optional[Dict[str, Any]]:
+def fetch_tcggo_price_history(tcggo_id: int, api_key: str, days: int = 31) -> Optional[Dict[str, Any]]:
     """
-    Fetches the last N days of price history from the TCGGO API using the tcgplayer_id.
+    Fetches the last N days of price history from the TCGGO API using the tcggo_id.
     """
     end = date.today()
     start = end - timedelta(days=max(1, days))
@@ -33,7 +33,7 @@ def fetch_tcggo_price_history(tcgplayer_id: int, api_key: str, days: int = 31) -
         "date_to": end.isoformat(),
         "page": "1",
         "sort": "desc",
-        "tcgid": str(tcgplayer_id)
+        "id": str(tcggo_id)
     }
     
     headers, query_params = tcggo_gateway_headers_query(api_key, q)
