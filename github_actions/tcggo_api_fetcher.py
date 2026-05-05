@@ -49,11 +49,9 @@ def fetch_tcggo_price_history(tcgplayer_id: int, api_key: str, days: int = 31) -
             
     except urllib.error.HTTPError as e:
         err_body = e.read().decode("utf-8", errors="replace")
-        print(f"TCGGO HTTP Error {e.code}: {err_body[:500]}")
-        return None
+        raise Exception(f"HTTP {e.code}: {err_body[:500]}")
     except Exception as e:
-        print(f"TCGGO Request Error: {e}")
-        return None
+        raise Exception(f"Request Error: {e}")
 
 def extract_latest_market_price(tcggo_response: Dict[str, Any]) -> Optional[float]:
     """

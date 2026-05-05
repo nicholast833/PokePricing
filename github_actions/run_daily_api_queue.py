@@ -96,21 +96,27 @@ def run_queue():
             tcgplayer_id = metrics.get('tcgtracking_product_id')
             if tcgplayer_id and tcgpro_key:
                 logging.info(f"  -> Fetching TCGGO history for tcgplayer_id={tcgplayer_id}")
-                tcg_data = fetch_tcggo_price_history(tcgplayer_id, tcgpro_key, days=2)
-                latest_market = extract_latest_market_price(tcg_data)
-                
-                if latest_market:
-                    logging.info(f"  -> TCGGO Market Price: ${latest_market}")
-                    if 'tcggo_market_history' not in price_history:
-                        price_history['tcggo_market_history'] = []
-                        
-                    # Prevent duplicates for today
-                    history_list = [h for h in price_history['tcggo_market_history'] if h.get('date') != today_iso]
-                    history_list.append({"date": today_iso, "price_usd": float(latest_market)})
-                    price_history['tcggo_market_history'] = sorted(history_list, key=lambda x: x['date'])
-                    updates_made = True
+                try:
+                    tcg_data = fetch_tcggo_price_history(tcgplayer_id, tcgpro_key, days=2)
+                    latest_market = extract_latest_market_price(tcg_data)
+                    
+                    if latest_market:
+                        logging.info(f"  -> TCGGO Market Price: ${latest_market}")
+                        if 'tcggo_market_history' not in price_history:
+                            price_history['tcggo_market_history'] = []
+                            
+                        # Prevent duplicates for today
+                        history_list = [h for h in price_history['tcggo_market_history'] if h.get('date') != today_iso]
+                        history_list.append({"date": today_iso, "price_usd": float(latest_market)})
+                        price_history['tcggo_market_history'] = sorted(history_list, key=lambda x: x['date'])
+                        updates_made = True
+                except Exception as e:
+                    logging.error(f"  -> TCGGO API Failed: {e}")
             else:
-                logging.info("  -> Skipping TCGGO: No tcgtracking_product_id found in metrics.")
+                if not tcgplayer_id:
+                    logging.info("  -> Skipping TCGGO: No tcgtracking_product_id found in metrics.")
+                elif not tcgpro_key:
+                    logging.error("  -> Skipping TCGGO: TCGPRO_API_KEY is empty or missing from environment!")
 
             # --- 2. eBay Finding API ---
             if ebay_app_id:
