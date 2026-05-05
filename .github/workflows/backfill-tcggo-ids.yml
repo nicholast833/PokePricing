@@ -1,0 +1,33 @@
+name: One-Time Backfill TCGGO IDs
+
+on:
+  workflow_dispatch:
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f github_actions/requirements.txt ]; then pip install -r github_actions/requirements.txt; fi
+
+      - name: Run Backfill Script
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          TCGPRO_API_KEY: ${{ secrets.TCGPRO_API_KEY }}
+          RAPIDAPI_KEY_TCGGO: ${{ secrets.RAPIDAPI_KEY_TCGGO }}
+          RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
+        run: |
+          python github_actions/backfill_tcggo_ids.py

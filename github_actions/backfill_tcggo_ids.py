@@ -30,6 +30,8 @@ def norm_str(s):
 
 def fetch_episode_cards(episode_id: int):
     headers = {"X-RapidAPI-Host": HOST, "Accept": "application/json"}
+    
+    # Check if this is a direct TCGGO key or a RapidAPI key
     if api_key.startswith("tcggo_"):
         url = f"https://{HOST}/episodes/{episode_id}/cards?rapidapi-key={api_key}&per_page=300"
     else:
@@ -129,7 +131,7 @@ def run_backfill():
         if match:
             tcggo_id = match.get('id')
             if tcggo_id:
-                print(f"[{idx}] MATCHED: {card['name']} -> TCGGO ID: {tcggo_id}")
+                print(f"[{idx}] MATCHED: {card['name'].encode('ascii', 'replace').decode()} -> TCGGO ID: {tcggo_id}")
                 metrics = card.get('metrics') or {}
                 metrics['tcggo_id'] = tcggo_id
                 
@@ -142,9 +144,9 @@ def run_backfill():
                     'metrics': metrics
                 })
             else:
-                print(f"[{idx}] Matched {card['name']}, but API card has no TCGGO ID")
+                print(f"[{idx}] Matched {card['name'].encode('ascii', 'replace').decode()}, but API card has no TCGGO ID")
         else:
-            print(f"[{idx}] No card match found for {card['name']} #{card['number']} in episode")
+            print(f"[{idx}] No card match found for {card['name'].encode('ascii', 'replace').decode()} #{card['number']} in episode")
 
     # 5. Push Updates
     if matched_updates:
