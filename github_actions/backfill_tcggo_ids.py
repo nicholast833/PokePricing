@@ -29,37 +29,23 @@ def norm_str(s):
     return unicodedata.normalize("NFC", str(s).strip()).casefold()
 
 def fetch_episode_cards(episode_id: int):
-    all_cards = []
-    page = 1
+    headers = {"X-RapidAPI-Host": HOST, "Accept": "application/json"}
     
-    while True:
-        headers = {"X-RapidAPI-Host": HOST, "Accept": "application/json"}
-        
-        # Check if this is a direct TCGGO key or a RapidAPI key
-        if api_key.startswith("tcggo_"):
-            url = f"https://{HOST}/episodes/{episode_id}/cards?rapidapi-key={api_key}&per_page=100&page={page}"
-        else:
-            headers["X-RapidAPI-Key"] = api_key
-            url = f"https://{HOST}/episodes/{episode_id}/cards?per_page=100&page={page}"
+    # Check if this is a direct TCGGO key or a RapidAPI key
+    if api_key.startswith("tcggo_"):
+        url = f"https://{HOST}/episodes/{episode_id}/cards?rapidapi-key={api_key}&per_page=100&sort=price_highest"
+    else:
+        headers["X-RapidAPI-Key"] = api_key
+        url = f"https://{HOST}/episodes/{episode_id}/cards?per_page=100&sort=price_highest"
 
-        req = urllib.request.Request(url, headers=headers, method="GET")
-        try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-                cards = data.get("data", [])
-                all_cards.extend(cards)
-                
-                # If we got less than 100 cards, we've reached the last page
-                if len(cards) < 100:
-                    break
-                    
-                page += 1
-                time.sleep(0.5) # small delay to respect rate limits
-        except Exception as e:
-            print(f"Error fetching episode {episode_id} page {page}: {e}")
-            break
-            
-    return all_cards
+    req = urllib.request.Request(url, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return data.get("data", [])
+    except Exception as e:
+        print(f"Error fetching episode {episode_id}: {e}")
+        return []
 
 def run_backfill():
     # 1. Load Episode Cache
