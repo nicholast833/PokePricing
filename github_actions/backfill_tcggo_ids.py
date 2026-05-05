@@ -47,14 +47,35 @@ def fetch_episode_cards(episode_id: int):
         print(f"Error fetching episode {episode_id}: {e}")
         return []
 
-def run_backfill():
-    # 1. Load Episode Cache
-    episodes_file = Path('scrape/tcggo_episodes_all.json')
-    if not episodes_file.exists():
-        print("Cannot find tcggo_episodes_all.json")
-        return
+def fetch_all_episodes():
+    all_episodes = []
+    page = 1
+    while True:
+        headers = {"X-RapidAPI-Host": HOST, "Accept": "application/json"}
+        if api_key.startswith("tcggo_"):
+            url = f"https://{HOST}/episodes?rapidapi-key={api_key}&page={page}"
+        else:
+            headers["X-RapidAPI-Key"] = api_key
+            url = f"https://{HOST}/episodes?page={page}"
 
-    episodes_data = json.loads(episodes_file.read_text(encoding="utf-8")).get("data", [])
+        req = urllib.request.Request(url, headers=headers, method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = json.loads(resp.read().decode("utf-8")).get("data", [])
+                if not data:
+                    break
+                all_episodes.extend(data)
+                page += 1
+                time.sleep(0.5)
+        except Exception as e:
+            print(f"Error fetching episodes page {page}: {e}")
+            break
+    return all_episodes
+
+def run_backfill():
+    # 1. Fetch all episodes dynamically
+    print("Fetching all TCGGO episodes...")
+    episodes_data = fetch_all_episodes()
     episodes_by_name = {norm_str(e['name']): e['id'] for e in episodes_data if e.get('name')}
     
     # Manually map promo sets if needed
