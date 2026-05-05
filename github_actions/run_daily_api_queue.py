@@ -110,6 +110,10 @@ def run_queue():
                         history_list.append({"date": today_iso, "price_usd": float(latest_market)})
                         price_history['tcggo_market_history'] = sorted(history_list, key=lambda x: x['date'])
                         updates_made = True
+                    else:
+                        # Log what the API actually returned so we can debug
+                        data_keys = list((tcg_data or {}).get('data', {}).keys())[:3]
+                        logging.warning(f"  -> TCGGO returned data (dates: {data_keys}) but tcg_player_market was null/missing")
                 except Exception as e:
                     logging.error(f"  -> TCGGO API Failed: {e}")
             else:
@@ -132,6 +136,10 @@ def run_queue():
                     metrics['ebay_sold_history_ungraded'] = sales['ungraded']
                     metrics['ebay_sold_sync_iso'] = today_iso
                     updates_made = True
+                else:
+                    logging.warning(f"  -> eBay returned 0 sold listings for '{query}'")
+            else:
+                logging.warning("  -> Skipping eBay: No EBAY_APP_ID found in environment!")
 
             # --- 3. Update Supabase ---
             current_time = datetime.datetime.now(datetime.timezone.utc).isoformat()
