@@ -454,6 +454,13 @@ const SHARED_UTILS = {
             if (dk.length >= 10) allLabelsSet.add(dk.slice(0, 10));
         });
 
+        // New API pipeline: tcggo_market_history array
+        const tcggoApiHistPre = Array.isArray(card.tcggo_market_history) ? card.tcggo_market_history : [];
+        tcggoApiHistPre.forEach((r) => {
+            const dk = String(r.date || '').slice(0, 10);
+            if (dk.length >= 10) allLabelsSet.add(dk);
+        });
+
         let labels = Array.from(allLabelsSet).filter(Boolean).sort();
         if (labels.length < 2) return null;
 
@@ -560,6 +567,54 @@ const SHARED_UTILS = {
                     type: 'line',
                     label: `TCGGO · Cardmarket low (EUR→USD ×${rate.toFixed(3)})`,
                     data: cmData,
+                    borderColor: '#ec4899',
+                    borderDash: [6, 4],
+                    backgroundColor: 'rgba(236,72,153,0.06)',
+                    fill: false,
+                    tension: 0.25,
+                    spanGaps: true,
+                });
+            }
+        }
+
+        // --- New API Pipeline: tcggo_market_history (array of {date, price_usd, cm_low}) ---
+        const tcggoApiHist = Array.isArray(card.tcggo_market_history) ? card.tcggo_market_history : [];
+        if (tcggoApiHist.length > 1 && !anyTcggoTcg) {
+            // Only add if the old daily format didn't already provide TCGGO data
+            const apiMap = new Map();
+            const cmMap = new Map();
+            tcggoApiHist.forEach((r) => {
+                const dk = String(r.date || '').slice(0, 10);
+                if (dk.length >= 10) {
+                    allLabelsSet.add(dk);
+                    if (r.price_usd != null && Number.isFinite(Number(r.price_usd))) {
+                        apiMap.set(dk, Number(r.price_usd));
+                    }
+                    if (r.cm_low != null && Number.isFinite(Number(r.cm_low))) {
+                        cmMap.set(dk, Number(r.cm_low));
+                    }
+                }
+            });
+            // Rebuild labels with the new dates added
+            labels = Array.from(allLabelsSet).filter(Boolean).sort();
+
+            if (apiMap.size > 0) {
+                datasets.push({
+                    type: 'line',
+                    label: 'TCG Pro · TCGPlayer Market (USD)',
+                    data: labels.map((l) => apiMap.get(l) ?? null),
+                    borderColor: '#f97316',
+                    backgroundColor: 'rgba(249,115,22,0.1)',
+                    fill: false,
+                    tension: 0.25,
+                    spanGaps: true,
+                });
+            }
+            if (cmMap.size > 0) {
+                datasets.push({
+                    type: 'line',
+                    label: 'TCG Pro · Cardmarket Low (EUR)',
+                    data: labels.map((l) => cmMap.get(l) ?? null),
                     borderColor: '#ec4899',
                     borderDash: [6, 4],
                     backgroundColor: 'rgba(236,72,153,0.06)',
