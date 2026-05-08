@@ -8,12 +8,14 @@ __pycache__/
 !.env.example
 ebay_listing_checker.env
 PSA API key.txt
+secrets/
 
 # Data Files & Backups
 *.json
 !package.json
 !tsconfig.json
 !supabase-config.js
+!pokemon_wizard_set_paths.json
 pokemon_sets_data.json*
 backups/
 tcg_cache/
@@ -41,7 +43,12 @@ _archive/
 data/
 .cursor/
 scripts/
-scrape/
+# Track Wizard sync + tiny deps for GitHub Actions; ignore rest of scrape/
+scrape/*
+!scrape/sync_pokemon_wizard.py
+!scrape/dataset_report_paths.py
+!scrape/json_atomic_util.py
+!scrape/tcgtracking_merge.py
 
 # Misc
 ebay_search.html
