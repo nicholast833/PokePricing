@@ -1,7 +1,9 @@
-# Re-fetches Pokémon Wizard card pages for every set's top_25_cards and merges chart-derived
-# 1Y price history (market, low, mid, high, trend %) into pokemon_sets_data.json.
+# Exports tracked cards from Supabase → pokemon_sets_data.json, re-fetches Pokémon Wizard card pages
+# for each top_25_cards row, merges chart-derived 1Y history (market, low, mid, high, trend %),
+# then writes Wizard fields back to pokemon_cards (metrics + price_history mirror).
 #
-# Does not commit to the repo; download the artifact for the updated JSON + sync report.
+# Secrets: SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY (injected as SUPABASE_KEY; same as daily-sync).
+# Artifact: updated JSON + sync report. Does not git-commit.
 name: Poll Wizard price history (all tracked cards)
 
 on:
@@ -23,6 +25,10 @@ on:
         description: "Write dataset only once at end (faster, easier to lose progress on cancel)"
         type: boolean
         default: false
+      skip_supabase_push:
+        description: "Export + poll only; do not write merged Wizard fields back to Supabase"
+        type: boolean
+        default: false
   # Full-catalog runs can take many hours; enable on a fork or after timing a dispatch run.
   # schedule:
   #   - cron: '0 11 * * 0'  # Weekly Sun 11:00 UTC
@@ -31,6 +37,11 @@ jobs:
   poll_wizard_price_history:
     runs-on: ubuntu-latest
     timeout-minutes: 360
+
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      # Same as Daily PokePricing Data Sync: service role JWT in SUPABASE_KEY
+      SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
 
     concurrency:
       group: poll-wizard-price-history-all-sets
@@ -52,6 +63,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r github_actions/requirements.txt
 
+      - name: Export pokemon_sets_data.json from Supabase
+        run: python github_actions/supabase_wizard_dataset_bridge.py export --output pokemon_sets_data.json
+
       - name: Poll all sets (top_25_cards → Wizard chart history)
         run: |
           set -euo pipefail
@@ -64,6 +78,10 @@ jobs:
             --max-sets "${{ inputs.max_sets }}" \
             --max-cards "${{ inputs.max_cards }}" \
             ${EXTRA}
+
+      - name: Apply Wizard fields back to Supabase
+        if: ${{ inputs.skip_supabase_push == false }}
+        run: python github_actions/supabase_wizard_dataset_bridge.py apply-wizard --input pokemon_sets_data.json
 
       - name: Upload poll outputs
         if: always()
