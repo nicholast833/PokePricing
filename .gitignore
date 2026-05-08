@@ -49,6 +49,8 @@ scrape/*
 !scrape/dataset_report_paths.py
 !scrape/json_atomic_util.py
 !scrape/tcgtracking_merge.py
+!scrape/gemrate_scraper.py
+!scrape/gemrate_set_overrides.json
 
 # Misc
 ebay_search.html

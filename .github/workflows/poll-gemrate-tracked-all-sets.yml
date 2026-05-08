@@ -1,0 +1,72 @@
+# Export tracked cards from Supabase → pokemon_sets_data.json, run GemRate Universal Pop
+# mapping + per-set card grids for every set's top_25_cards, then push gemrate metrics + set links
+# back to Supabase (metrics.gemrate on cards; gemrate_* merged into pokemon_sets.metadata).
+#
+# Secrets: SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY (as SUPABASE_KEY). No GemRate API key (public HTML).
+name: Poll GemRate (all tracked cards)
+
+on:
+  workflow_dispatch:
+    inputs:
+      sleep_sets:
+        description: "Seconds between set scrapes (GemRate rate limit; default 2)"
+        type: string
+        default: "2"
+      skip_supabase_push:
+        description: "Export + scrape only; do not write back to Supabase"
+        type: boolean
+        default: false
+  # schedule:
+  #   - cron: '0 14 * * 1'  # Weekly Mon 14:00 UTC
+
+jobs:
+  poll_gemrate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 720
+
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
+    concurrency:
+      group: poll-gemrate-tracked-all-sets
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: github_actions/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r github_actions/requirements.txt
+
+      - name: Export pokemon_sets_data.json from Supabase
+        run: python github_actions/supabase_wizard_dataset_bridge.py export --output pokemon_sets_data.json
+
+      - name: Poll GemRate for all sets
+        run: |
+          set -euo pipefail
+          python github_actions/poll_gemrate_tracked_cards_all_sets.py \
+            --sleep-sets "${{ inputs.sleep_sets }}"
+
+      - name: Apply GemRate fields back to Supabase
+        if: ${{ inputs.skip_supabase_push == false }}
+        run: python github_actions/supabase_wizard_dataset_bridge.py apply-gemrate --input pokemon_sets_data.json
+
+      - name: Upload outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gemrate-poll-${{ github.run_id }}
+          if-no-files-found: warn
+          path: |
+            pokemon_sets_data.json
+            reports/gemrate_scrape_skipped.txt

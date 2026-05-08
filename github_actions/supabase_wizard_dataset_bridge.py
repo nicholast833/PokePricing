@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-Export Supabase pokemon_sets + pokemon_cards into pokemon_sets_data.json (Explorer / Wizard shape),
-and apply Wizard merge fields from that JSON back onto pokemon_cards (metrics + price_history).
+Export Supabase pokemon_sets + pokemon_cards into pokemon_sets_data.json (Explorer shape),
+and apply merge fields from that JSON back onto Supabase (Wizard + GemRate).
 
 CI usage:
   python supabase_wizard_dataset_bridge.py export --output pokemon_sets_data.json
   python scrape/sync_pokemon_wizard.py ...  # or poll_wizard_tracked_cards_all_sets.py
   python supabase_wizard_dataset_bridge.py apply-wizard --input pokemon_sets_data.json
+  python scrape/gemrate_scraper.py --data pokemon_sets_data.json
+  python supabase_wizard_dataset_bridge.py apply-gemrate --input pokemon_sets_data.json
 
 Env (same as run_daily_api_queue / backup scripts):
   SUPABASE_URL
@@ -88,8 +90,17 @@ def _card_row_to_toplist_shape(row: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _set_row_to_export_shape(row: Dict[str, Any]) -> Dict[str, Any]:
-    """Include set row as in DB; keep metadata nested (Wizard sync only needs set_code, set_name, top_25_cards)."""
+    """Include set row as in DB."""
     return dict(row)
+
+
+def _merge_set_metadata_for_export(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Match supabase-config.js: { ...set, ...(set.metadata || {}) } so GemRate set fields round-trip."""
+    base = dict(row)
+    meta = base.get("metadata")
+    if isinstance(meta, dict):
+        return {**base, **meta}
+    return base
 
 
 def export_json(output_path: Path) -> None:
@@ -115,7 +126,7 @@ def export_json(output_path: Path) -> None:
         sc = str(s.get("set_code") or "").strip().lower()
         rows = by_set.get(sc, [])
         top = [_card_row_to_toplist_shape(r) for r in rows]
-        row = _set_row_to_export_shape(s)
+        row = _merge_set_metadata_for_export(_set_row_to_export_shape(s))
         row["top_25_cards"] = top
         data.append(row)
 
@@ -203,8 +214,98 @@ def apply_wizard_from_json(input_path: Path, *, batch_size: int = 80) -> None:
     print(f"Done. updated_ok={ok} errors={err}", flush=True)
 
 
+SET_GEMRATE_KEYS = ("gemrate_set_total", "gemrate_id", "gemrate_set_link")
+
+
+def apply_gemrate_from_json(input_path: Path) -> None:
+    raw = json.loads(input_path.read_text(encoding="utf-8"))
+    if not isinstance(raw, list):
+        raise SystemExit("pokemon_sets_data.json must be a list of sets")
+
+    client = _supabase()
+    now = datetime.now(timezone.utc).isoformat()
+
+    set_ok = 0
+    set_skip = 0
+    set_err = 0
+    for s in raw:
+        if not isinstance(s, dict):
+            continue
+        sc = str(s.get("set_code") or "").strip().lower()
+        if not sc:
+            continue
+        patch = {k: s[k] for k in SET_GEMRATE_KEYS if k in s}
+        if not patch:
+            set_skip += 1
+            continue
+        try:
+            res = client.table("pokemon_sets").select("metadata").eq("set_code", sc).limit(1).execute()
+            rows = res.data or []
+            if not rows:
+                set_err += 1
+                print(f"  skip set: no pokemon_sets row for {sc!r}", flush=True)
+                continue
+            old_meta = rows[0].get("metadata") if isinstance(rows[0].get("metadata"), dict) else {}
+            new_meta = {**old_meta, **patch}
+            client.table("pokemon_sets").update({"metadata": new_meta}).eq("set_code", sc).execute()
+            set_ok += 1
+        except Exception as e:
+            set_err += 1
+            print(f"  set update failed {sc!r}: {e}", flush=True)
+
+    print(
+        f"GemRate sets: updated={set_ok} skipped_no_fields={set_skip} errors={set_err}",
+        flush=True,
+    )
+
+    flat_by_id = _collect_flat_cards(raw)
+    if not flat_by_id:
+        print("No cards under top_25_cards; skipping card metrics.", flush=True)
+        return
+
+    ids = sorted(flat_by_id.keys())
+    batch_size = 80
+    ok = 0
+    err = 0
+    print(f"Applying metrics.gemrate for {len(ids)} cards ...", flush=True)
+
+    for i in range(0, len(ids), batch_size):
+        chunk = ids[i : i + batch_size]
+        res = (
+            client.table("pokemon_cards")
+            .select("unique_card_id,metrics")
+            .in_("unique_card_id", chunk)
+            .execute()
+        )
+        rows = {r["unique_card_id"]: r for r in (res.data or []) if r.get("unique_card_id")}
+
+        for uid in chunk:
+            flat = flat_by_id.get(uid) or {}
+            if "gemrate" not in flat:
+                continue
+            cur = rows.get(uid)
+            if not cur:
+                err += 1
+                print(f"  skip card: no DB row for {uid!r}", flush=True)
+                continue
+            old_m = cur.get("metrics") if isinstance(cur.get("metrics"), dict) else {}
+            new_m = {**old_m, "gemrate": flat.get("gemrate")}
+            try:
+                client.table("pokemon_cards").update({"metrics": new_m, "last_synced_at": now}).eq(
+                    "unique_card_id", uid
+                ).execute()
+                ok += 1
+            except Exception as e:
+                err += 1
+                print(f"  card update failed {uid!r}: {e}", flush=True)
+
+        print(f"  progress {min(i + batch_size, len(ids))}/{len(ids)} (ok={ok} err={err})", flush=True)
+
+    print(f"GemRate cards: updated_ok={ok} errors={err}", flush=True)
+
+
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Supabase ↔ pokemon_sets_data.json bridge for Wizard polls")
+    ap = argparse.ArgumentParser(description="Supabase ↔ pokemon_sets_data.json bridge (Wizard + GemRate)")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     e = sub.add_parser("export", help="Write pokemon_sets_data.json from Supabase")
@@ -214,11 +315,16 @@ def main() -> int:
     a.add_argument("--input", type=Path, default=ROOT / "pokemon_sets_data.json")
     a.add_argument("--batch-size", type=int, default=80)
 
+    g = sub.add_parser("apply-gemrate", help="Merge gemrate card metrics + set GemRate fields from JSON")
+    g.add_argument("--input", type=Path, default=ROOT / "pokemon_sets_data.json")
+
     args = ap.parse_args()
     if args.cmd == "export":
         export_json(args.output.resolve())
     elif args.cmd == "apply-wizard":
         apply_wizard_from_json(args.input.resolve(), batch_size=max(1, int(args.batch_size)))
+    elif args.cmd == "apply-gemrate":
+        apply_gemrate_from_json(args.input.resolve())
     else:
         return 1
     return 0
