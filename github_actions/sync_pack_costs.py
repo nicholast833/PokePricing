@@ -1,0 +1,710 @@
+#!/usr/bin/env python3
+"""
+Estimate English **per-booster-pack USD** for each set in pokemon_sets_data.json using:
+
+1. **TCGTracking Open TCG API** (no key): ``/tcgapi/v1/3/sets/{id}`` + ``/pricing``, or local
+   ``tcg_cache/{id}/products.json`` + ``pricing.json`` when present.
+2. **TCGCSV** (no key, daily export): ``/tcgplayer/3/groups`` then ``/tcgplayer/3/{groupId}/products`` + ``prices``
+   when no cache match — see https://tcgcsv.com/docs
+3. **TCGGO** (RapidAPI / direct key, optional — same host as card history): list products with
+   ``GET /episodes/{episodeId}/products`` (or ``GET /pokemon/products``), then
+   ``GET /history-prices`` with ``tcgplayer_id`` or internal product ``id`` per
+   https://www.tcggo.com/api-docs/v1/ — pairs with the TCGPlayer product id from (1)/(2).
+
+Selection priority (``--prefer auto`` when ``--tcggo-key`` or ``TCGPRO_API_KEY`` is set):
+  - **TCGGO** latest TCGPlayer market from history for the English booster-pack SKU (if available).
+  - Else single-pack / ETB / booster-box logic from Tracking + TCGCSV (unchanged).
+
+Example:
+  python github_actions/sync_pack_costs.py --all-sets --cache tcg_cache --sleep 0.15
+  python github_actions/sync_pack_costs.py --all-sets --cache tcg_cache --tcggo-key "$env:TCGPRO_API_KEY"
+  python github_actions/sync_pack_costs.py --only-set-codes sv7 --prefer tcggo
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import sys
+import unicodedata
+import time
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPT_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(SCRIPT_DIR))
+sys.path.insert(0, str(ROOT / "scrape"))
+
+from dataset_report_paths import dataset_sidecar_report_path  # noqa: E402
+from json_atomic_util import write_json_atomic  # noqa: E402
+from tcgtracking_merge import find_standard_booster_box_product, norm_set_key  # noqa: E402
+
+from sync_tcgplayer_mpapi import find_tcg_cache_products_path, pick_booster_pack_product  # noqa: E402
+
+from tcggo_api_fetcher import (  # noqa: E402
+    extract_latest_market_price,
+    fetch_all_episodes,
+    fetch_episode_products_all,
+    fetch_tcggo_price_history_query,
+    find_tcggo_product_row_for_tcgplayer_id,
+    tcggo_product_internal_id,
+)
+
+TCGTRACK_BASE = "https://tcgtracking.com/tcgapi/v1/3"
+TCGCSV_GROUPS = "https://tcgcsv.com/tcgplayer/3/groups"
+HEAD = {"User-Agent": "Mozilla/5.0 PokemonTCG-Explorer/sync_pack_costs (hobbyist)"}
+
+_PACKS_IN_NAME_RE = re.compile(r"(\d+)\s*(?:booster\s+packs?|packs?\s*&\s*booster)", re.I)
+
+
+def _norm_str(s: Any) -> str:
+    return unicodedata.normalize("NFC", str(s).strip()).casefold()
+
+
+def _episode_index_from_rows(episodes: List[Dict[str, Any]]) -> Dict[str, int]:
+    out: Dict[str, int] = {}
+    for e in episodes:
+        if not isinstance(e, dict):
+            continue
+        nm = e.get("name")
+        eid = e.get("id")
+        if nm and eid is not None:
+            try:
+                out[_norm_str(nm)] = int(eid)
+            except (TypeError, ValueError):
+                continue
+    return out
+
+
+def _resolve_tcggo_episode_id(
+    set_row: Dict[str, Any],
+    episodes_by_name: Dict[str, int],
+) -> Optional[int]:
+    set_name = str(set_row.get("set_name") or "")
+    set_code = str(set_row.get("set_code") or "").strip().lower()
+    norm_set = _norm_str(set_name)
+    eid = episodes_by_name.get(norm_set)
+    if eid:
+        return int(eid)
+    if "promo" in norm_set:
+        if "wizards" in norm_set or set_code == "basep":
+            v = episodes_by_name.get(_norm_str("Wizards Black Star Promos"))
+            if v:
+                return int(v)
+        if "nintendo" in norm_set or set_code == "np":
+            v = episodes_by_name.get(_norm_str("Nintendo Black Star Promos"))
+            if v:
+                return int(v)
+        if "ex" in norm_set or set_code == "ex5":
+            v = episodes_by_name.get(_norm_str("EX Promos"))
+            if v:
+                return int(v)
+    return None
+
+
+def _fetch_tcggo_pack_market_usd(
+    api_key: str,
+    *,
+    pack_tcgplayer_pid: int,
+    set_row: Dict[str, Any],
+    episodes_by_name: Dict[str, int],
+    episode_products_cache: Dict[int, List[Dict[str, Any]]],
+    sleep_s: float,
+    history_days: int,
+) -> Tuple[Optional[float], Dict[str, Any]]:
+    """
+    Resolve sealed booster-pack USD via TCGGO history: try ``tcgplayer_id`` query first, then
+    episode product row → internal ``id`` → history (matches official product docs).
+    """
+    meta: Dict[str, Any] = {"tcgplayer_pack_product_id": int(pack_tcgplayer_pid)}
+    # 1) Direct history by TCGPlayer product id (documented alternate key for /history-prices).
+    try:
+        hist = fetch_tcggo_price_history_query(
+            api_key, days=history_days, tcgplayer_id=int(pack_tcgplayer_pid)
+        )
+        v = extract_latest_market_price(hist) if hist else None
+        if v is not None:
+            meta["path"] = "history_prices.tcgplayer_id"
+            return float(v), meta
+    except Exception as ex:
+        meta["tcgplayer_id_error"] = str(ex)[:240]
+
+    # 2) Episode catalog → match tcgplayer id → internal id → history
+    ep_id = _resolve_tcggo_episode_id(set_row, episodes_by_name)
+    if not ep_id:
+        meta["path"] = "episode_unresolved"
+        return None, meta
+    meta["episode_id"] = int(ep_id)
+    if ep_id not in episode_products_cache:
+        episode_products_cache[ep_id] = fetch_episode_products_all(
+            int(ep_id), api_key, sleep_s=max(0.0, sleep_s)
+        )
+        time.sleep(max(0.0, sleep_s))
+    rows = episode_products_cache.get(ep_id) or []
+    meta["episode_product_rows"] = len(rows)
+    row = find_tcggo_product_row_for_tcgplayer_id(rows, int(pack_tcgplayer_pid))
+    if not row:
+        meta["path"] = "episode_products.no_row"
+        return None, meta
+    internal = tcggo_product_internal_id(row)
+    if not internal:
+        meta["path"] = "episode_products.no_internal_id"
+        return None, meta
+    meta["tcggo_product_id"] = int(internal)
+    try:
+        hist2 = fetch_tcggo_price_history_query(api_key, days=history_days, tcggo_id=int(internal))
+        v2 = extract_latest_market_price(hist2) if hist2 else None
+        if v2 is not None:
+            meta["path"] = "history_prices.tcggo_internal_id"
+            return float(v2), meta
+    except Exception as ex:
+        meta["internal_id_error"] = str(ex)[:240]
+    meta["path"] = "history_failed"
+    return None, meta
+
+
+def _f(x: Any) -> Optional[float]:
+    if x is None:
+        return None
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return None
+    return v if v > 0 else None
+
+
+def _packs_per_box(set_row: Dict[str, Any]) -> int:
+    raw = set_row.get("packs_per_box")
+    try:
+        n = int(raw) if raw is not None else 36
+    except (TypeError, ValueError):
+        n = 36
+    return n if n > 0 else 36
+
+
+def _infer_packs_in_sealed(name: str) -> Optional[int]:
+    m = _PACKS_IN_NAME_RE.search(name or "")
+    if m:
+        return int(m.group(1))
+    low = (name or "").lower()
+    if "elite trainer box" in low:
+        if re.search(r"\b8\b", low) and "pack" in low:
+            return 8
+        if re.search(r"\b10\b", low) and "pack" in low:
+            return 10
+        return 9
+    if "super premium collection" in low or "upc" in low:
+        m2 = re.search(r"(\d+)\s*booster", low)
+        if m2:
+            return int(m2.group(1))
+    return None
+
+
+def _http_json(url: str, *, timeout: int = 90) -> Any:
+    req = urllib.request.Request(url, headers=HEAD)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def first_tcg_market_usd(price_entry: Any) -> Optional[float]:
+    if not isinstance(price_entry, dict):
+        return None
+    tcg = price_entry.get("tcg")
+    if not isinstance(tcg, dict):
+        return None
+    for prefer in ("Normal", "Holofoil", "Reverse Holofoil"):
+        row = tcg.get(prefer)
+        if isinstance(row, dict):
+            m = _f(row.get("market"))
+            if m is not None:
+                return m
+    for row in tcg.values():
+        if isinstance(row, dict):
+            m = _f(row.get("market"))
+            if m is not None:
+                return m
+    return None
+
+
+def _load_local_cache_bundle(cache_dir: Path, set_name: str) -> Optional[Tuple[int, List[Dict[str, Any]], Dict[str, Any]]]:
+    pj = find_tcg_cache_products_path(cache_dir, set_name)
+    if not pj or not pj.is_file():
+        return None
+    try:
+        sid = int(pj.parent.name)
+    except ValueError:
+        return None
+    try:
+        pdata = json.loads(pj.read_text(encoding="utf-8"))
+        products = pdata.get("products") or []
+    except (json.JSONDecodeError, OSError):
+        products = []
+    prices: Dict[str, Any] = {}
+    prj = pj.parent / "pricing.json"
+    if prj.is_file():
+        try:
+            prices = json.loads(prj.read_text(encoding="utf-8")).get("prices") or {}
+        except (json.JSONDecodeError, OSError):
+            prices = {}
+    return sid, products, prices
+
+
+def _fetch_live_tracking(sid: int) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    products = _http_json(f"{TCGTRACK_BASE}/sets/{sid}", timeout=120)
+    plist = products.get("products") if isinstance(products, dict) else []
+    if not isinstance(plist, list):
+        plist = []
+    try:
+        pr = _http_json(f"{TCGTRACK_BASE}/sets/{sid}/pricing", timeout=120)
+        prices = pr.get("prices") if isinstance(pr, dict) else {}
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, json.JSONDecodeError, ValueError):
+        prices = {}
+    if not isinstance(prices, dict):
+        prices = {}
+    return plist, prices
+
+
+def _pick_etb_product(products: List[Dict[str, Any]], set_display_name: str) -> Optional[Dict[str, Any]]:
+    short = norm_set_key(set_display_name).replace("pokemon", "").strip()
+    cands: List[Dict[str, Any]] = []
+    for p in products:
+        if not isinstance(p, dict):
+            continue
+        name = str(p.get("name") or "")
+        low = name.lower()
+        if "elite trainer box" not in low:
+            continue
+        if "case" in low:
+            continue
+        cands.append(p)
+    if not cands:
+        return None
+    cands.sort(key=lambda x: len(str(x.get("name") or "")))
+    for p in cands:
+        if short and short in norm_set_key(str(p.get("name") or "")):
+            return p
+    return cands[0]
+
+
+def _clear_pack_cost_fields(set_row: Dict[str, Any]) -> None:
+    for k in (
+        "pack_cost_primary_usd",
+        "pack_cost_method",
+        "pack_cost_sync_iso",
+        "pack_cost_breakdown",
+    ):
+        set_row.pop(k, None)
+
+
+def _tcgcsv_match_group_id(set_row: Dict[str, Any], groups: List[Dict[str, Any]]) -> Optional[int]:
+    want_name = norm_set_key(str(set_row.get("set_name") or ""))
+    want_abbr = str(set_row.get("set_code") or "").strip().upper()
+    best: Tuple[int, int, str] = (-1, 0, "")  # score, groupId, label
+    for g in groups:
+        if not isinstance(g, dict):
+            continue
+        gid = g.get("groupId")
+        try:
+            gid_i = int(gid)
+        except (TypeError, ValueError):
+            continue
+        nm = norm_set_key(str(g.get("name") or ""))
+        abbr = str(g.get("abbreviation") or "").strip().upper()
+        score = 0
+        if want_abbr and abbr == want_abbr:
+            score += 120
+        if want_name and nm == want_name:
+            score += 100
+        elif want_name and want_name in nm:
+            score += 70
+        elif want_name and nm in want_name:
+            score += 50
+        if score > best[0]:
+            best = (score, gid_i, str(g.get("name") or ""))
+    return best[1] if best[0] >= 50 else None
+
+
+def _tcgcsv_products_prices(group_id: int) -> Tuple[List[Dict[str, Any]], Dict[int, float]]:
+    proot = f"https://tcgcsv.com/tcgplayer/3/{group_id}"
+    try:
+        pj = _http_json(f"{proot}/products", timeout=120)
+        pr = _http_json(f"{proot}/prices", timeout=120)
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, json.JSONDecodeError, ValueError):
+        return [], {}
+    products = pj.get("results") if isinstance(pj, dict) else []
+    if not isinstance(products, list):
+        products = []
+    rows = pr.get("results") if isinstance(pr, dict) else []
+    market_by_pid: Dict[int, float] = {}
+    if isinstance(rows, list):
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            pid = row.get("productId")
+            m = _f(row.get("marketPrice"))
+            if m is None:
+                continue
+            try:
+                pid_i = int(pid)
+            except (TypeError, ValueError):
+                continue
+            prev = market_by_pid.get(pid_i)
+            if prev is None or m > prev:
+                market_by_pid[pid_i] = m
+    return products, market_by_pid
+
+
+def _price_for_product(
+    pid: int,
+    prices: Dict[str, Any],
+    tcgcsv_markets: Optional[Dict[int, float]],
+) -> Optional[float]:
+    pe = prices.get(str(pid)) or prices.get(pid)
+    m = first_tcg_market_usd(pe)
+    if m is not None:
+        return m
+    if tcgcsv_markets and pid in tcgcsv_markets:
+        return tcgcsv_markets[pid]
+    return None
+
+
+def compute_pack_costs(
+    set_row: Dict[str, Any],
+    products: List[Dict[str, Any]],
+    prices: Dict[str, Any],
+    *,
+    prefer: str,
+    tcgcsv_markets: Optional[Dict[int, float]] = None,
+) -> Tuple[Optional[float], str, Dict[str, Any]]:
+    set_name = str(set_row.get("set_name") or "")
+    ppb = _packs_per_box(set_row)
+    breakdown: Dict[str, Any] = {"packs_per_box": ppb}
+
+    pack_p = pick_booster_pack_product(products, set_name)
+    single_usd: Optional[float] = None
+    if pack_p and pack_p.get("id"):
+        try:
+            pid = int(pack_p["id"])
+        except (TypeError, ValueError):
+            pid = 0
+        if pid:
+            single_usd = _price_for_product(pid, prices, tcgcsv_markets)
+            breakdown["single_booster_pack"] = {
+                "product_id": pid,
+                "name": pack_p.get("name"),
+                "market_usd": single_usd,
+            }
+
+    box_p = find_standard_booster_box_product(products)
+    box_usd: Optional[float] = None
+    box_implied: Optional[float] = None
+    if box_p and box_p.get("id"):
+        try:
+            bid = int(box_p["id"])
+        except (TypeError, ValueError):
+            bid = 0
+        if bid:
+            box_usd = _price_for_product(bid, prices, tcgcsv_markets)
+            if box_usd is not None:
+                box_implied = round(box_usd / ppb, 4)
+            breakdown["booster_box"] = {
+                "product_id": bid,
+                "name": box_p.get("name"),
+                "market_usd": box_usd,
+                "implied_pack_usd": box_implied,
+            }
+
+    etb_p = _pick_etb_product(products, set_name)
+    etb_usd: Optional[float] = None
+    etb_implied: Optional[float] = None
+    etb_packs: Optional[int] = None
+    if etb_p and etb_p.get("id"):
+        try:
+            eid = int(etb_p["id"])
+        except (TypeError, ValueError):
+            eid = 0
+        if eid:
+            etb_usd = _price_for_product(eid, prices, tcgcsv_markets)
+            etb_packs = _infer_packs_in_sealed(str(etb_p.get("name") or ""))
+            if etb_usd is not None and etb_packs and etb_packs > 0:
+                etb_implied = round(etb_usd / etb_packs, 4)
+            breakdown["elite_trainer_box"] = {
+                "product_id": eid,
+                "name": etb_p.get("name"),
+                "market_usd": etb_usd,
+                "inferred_packs": etb_packs,
+                "implied_pack_usd": etb_implied,
+            }
+
+    if prefer == "single_pack" and single_usd is not None:
+        return single_usd, "single_booster_pack", breakdown
+    if prefer == "box_implied" and box_implied is not None:
+        return box_implied, "booster_box_implied", breakdown
+    if prefer == "etb_implied" and etb_implied is not None:
+        return etb_implied, "etb_implied", breakdown
+
+    # auto
+    if single_usd is not None:
+        return single_usd, "single_booster_pack", breakdown
+    if etb_implied is not None:
+        return etb_implied, "etb_implied", breakdown
+    if box_implied is not None:
+        return box_implied, "booster_box_implied", breakdown
+    return None, "none", breakdown
+
+
+def run_one_set(
+    set_row: Dict[str, Any],
+    *,
+    cache_dir: Path,
+    prefer: str,
+    sleep_s: float,
+    groups_store: Dict[str, Any],
+    tcggo_state: Dict[str, Any],
+    rep: Dict[str, Any],
+) -> None:
+    set_name = str(set_row.get("set_name") or "")
+    sc = str(set_row.get("set_code") or "").strip().lower()
+    _clear_pack_cost_fields(set_row)
+
+    bundle = _load_local_cache_bundle(cache_dir, set_name)
+    tcgcsv_markets: Optional[Dict[int, float]] = None
+    products: List[Dict[str, Any]] = []
+    prices: Dict[str, Any] = {}
+
+    if bundle:
+        sid, products, prices = bundle
+        if not prices and sid:
+            try:
+                _, prices = _fetch_live_tracking(sid)
+                rep["live_pricing_fetches"] = rep.get("live_pricing_fetches", 0) + 1
+                time.sleep(max(0.0, sleep_s))
+            except Exception as e:
+                rep["pricing_fetch_errors"] = rep.get("pricing_fetch_errors", 0) + 1
+                print(f"  [{sc}] WARN live pricing {sid}: {e!r}", flush=True)
+    else:
+        rep["sets_no_cache"] = rep.get("sets_no_cache", 0) + 1
+        if groups_store.get("groups") is None:
+            try:
+                print("  [tcgcsv] loading groups catalog ...", flush=True)
+                raw = _http_json(TCGCSV_GROUPS, timeout=180)
+                groups_store["groups"] = list(raw.get("results") or [])
+                time.sleep(0.12)
+            except Exception as e:
+                print(f"  [{sc}] SKIP no tcg_cache match and TCGCSV groups failed: {e!r}", flush=True)
+                rep["sets_skipped"] += 1
+                return
+        gid = _tcgcsv_match_group_id(set_row, groups_store.get("groups") or [])
+        if not gid:
+            print(f"  [{sc}] SKIP no tcg_cache and no TCGCSV group match for {set_name!r}", flush=True)
+            rep["sets_skipped"] += 1
+            return
+        try:
+            products, tcgcsv_markets = _tcgcsv_products_prices(gid)
+            norm_prods: List[Dict[str, Any]] = []
+            for p in products:
+                if not isinstance(p, dict):
+                    continue
+                q = dict(p)
+                if "id" not in q and q.get("productId") is not None:
+                    try:
+                        q["id"] = int(q["productId"])
+                    except (TypeError, ValueError):
+                        pass
+                norm_prods.append(q)
+            products = norm_prods
+            time.sleep(0.12)
+            rep["tcgcsv_group_hits"] = rep.get("tcgcsv_group_hits", 0) + 1
+            print(f"  [{sc}] TCGCSV groupId={gid} products={len(products)}", flush=True)
+        except Exception as e:
+            print(f"  [{sc}] SKIP TCGCSV fetch failed: {e!r}", flush=True)
+            rep["sets_skipped"] += 1
+            return
+
+    if not products:
+        print(f"  [{sc}] SKIP empty product list", flush=True)
+        rep["sets_skipped"] += 1
+        return
+
+    track_prefer = "auto" if prefer == "tcggo" else prefer
+    primary, method, breakdown = compute_pack_costs(
+        set_row, products, prices, prefer=track_prefer, tcgcsv_markets=tcgcsv_markets
+    )
+
+    api_key = str(tcgo_state.get("api_key") or "").strip()
+    sp = breakdown.get("single_booster_pack") if isinstance(breakdown.get("single_booster_pack"), dict) else {}
+    tid = sp.get("product_id")
+    tcggo_usd: Optional[float] = None
+    tcggo_br: Dict[str, Any] = {}
+    if api_key and tid:
+        try:
+            tcggo_usd, tcggo_br = _fetch_tcggo_pack_market_usd(
+                api_key,
+                pack_tcgplayer_pid=int(tid),
+                set_row=set_row,
+                episodes_by_name=tcgo_state.get("episodes_by_name") or {},
+                episode_products_cache=tcggo_state.setdefault("episode_products", {}),
+                sleep_s=sleep_s,
+                history_days=int(tcgo_state.get("history_days") or 180),
+            )
+            if tcggo_usd is not None:
+                rep["tcggo_ok"] = rep.get("tcggo_ok", 0) + 1
+            else:
+                rep["tcggo_miss"] = rep.get("tcggo_miss", 0) + 1
+        except Exception as ex:
+            tcggo_br = {"error": str(ex)[:240]}
+            rep["tcggo_errors"] = rep.get("tcggo_errors", 0) + 1
+    breakdown["tcggo"] = tcggo_br
+
+    if prefer == "tcggo":
+        if tcggo_usd is not None:
+            primary, method = float(tcggo_usd), "tcggo_pack_history"
+        else:
+            primary, method = None, "none"
+    elif prefer == "auto" and api_key and tcggo_usd is not None:
+        primary, method = float(tcggo_usd), "tcggo_pack_history"
+
+    iso = datetime.now(timezone.utc).isoformat()
+    set_row["pack_cost_sync_iso"] = iso
+    set_row["pack_cost_breakdown"] = breakdown
+    set_row["pack_cost_method"] = method
+    if primary is not None:
+        set_row["pack_cost_primary_usd"] = round(float(primary), 4)
+        set_row["tcgplayer_pack_price"] = round(float(primary), 2)
+        rep["sets_updated"] += 1
+        print(
+            f"  [{sc}] OK method={method} pack_usd={set_row['tcgplayer_pack_price']!r} ({set_name[:40]!r})",
+            flush=True,
+        )
+    else:
+        set_row["pack_cost_primary_usd"] = None
+        rep["sets_no_price"] += 1
+        print(f"  [{sc}] WARN no pack price derived", flush=True)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Sync per-pack USD estimates (TCGTracking + TCGCSV)")
+    ap.add_argument("--input", type=Path, default=ROOT / "pokemon_sets_data.json")
+    ap.add_argument("--output", type=Path, default=ROOT / "pokemon_sets_data.json")
+    ap.add_argument("--cache", type=Path, default=ROOT / "tcg_cache")
+    ap.add_argument("--only-set-codes", default="", help="Comma-separated set_code")
+    ap.add_argument("--all-sets", action="store_true")
+    ap.add_argument("--sleep", type=float, default=0.12, help="Delay after network calls")
+    ap.add_argument(
+        "--prefer",
+        choices=("auto", "single_pack", "box_implied", "etb_implied", "tcggo"),
+        default="auto",
+        help="Pricing tier: auto prefers TCGGO pack history when --tcggo-key is set, else Tracking/TCGCSV",
+    )
+    ap.add_argument(
+        "--tcggo-key",
+        default="",
+        help="RapidAPI key or tcggo_* key (else env TCGPRO_API_KEY / RAPIDAPI_KEY_TCGGO / RAPIDAPI_KEY)",
+    )
+    ap.add_argument(
+        "--tcggo-history-days",
+        type=int,
+        default=180,
+        help="Date window for GET /history-prices on the booster-pack product",
+    )
+    ap.add_argument("--backup", action="store_true")
+    args = ap.parse_args()
+
+    only = {x.strip().lower() for x in args.only_set_codes.split(",") if x.strip()}
+    if args.all_sets and only:
+        raise SystemExit("Pass either --all-sets or --only-set-codes, not both.")
+    if not only and not args.all_sets:
+        raise SystemExit("Pass --all-sets or --only-set-codes.")
+
+    inp = args.input.resolve()
+    out = args.output.resolve()
+    if args.backup and inp == out and inp.is_file():
+        bak = inp.with_suffix(inp.suffix + ".pack_costs_bak")
+        shutil.copy2(inp, bak)
+        print("Wrote backup ->", bak, flush=True)
+
+    data = json.loads(inp.read_text(encoding="utf-8"))
+    if not isinstance(data, list):
+        raise SystemExit("Expected pokemon_sets_data.json as a JSON array")
+
+    rep: Dict[str, Any] = {
+        "sync_iso": datetime.now(timezone.utc).isoformat(),
+        "source": "tcgtracking_tcgcsv_tcggo_optional",
+        "prefer": args.prefer,
+        "only_set_codes": sorted(only) if only else ["__ALL_SETS__"],
+        "sets_updated": 0,
+        "sets_skipped": 0,
+        "sets_no_price": 0,
+        "sets_no_cache": 0,
+        "tcgcsv_group_hits": 0,
+        "live_pricing_fetches": 0,
+        "pricing_fetch_errors": 0,
+        "tcggo_ok": 0,
+        "tcggo_miss": 0,
+        "tcggo_errors": 0,
+    }
+
+    key = (
+        str(args.tcggo_key or "").strip()
+        or os.environ.get("TCGPRO_API_KEY", "").strip()
+        or os.environ.get("RAPIDAPI_KEY_TCGGO", "").strip()
+        or os.environ.get("RAPIDAPI_KEY", "").strip()
+    )
+    tcggo_state: Dict[str, Any] = {
+        "api_key": key,
+        "episodes_by_name": {},
+        "episode_products": {},
+        "history_days": max(7, int(args.tcggo_history_days or 180)),
+    }
+    if key:
+        print("[tcggo] loading /episodes index ...", flush=True)
+        try:
+            ep_rows = fetch_all_episodes(key, sleep_s=max(0.0, float(args.sleep)))
+            idx = _episode_index_from_rows(ep_rows)
+            idx[_norm_str("Wizards Black Star Promos")] = idx.get(_norm_str("Wizards Black Star Promos"), 125)
+            idx[_norm_str("Nintendo Black Star Promos")] = idx.get(_norm_str("Nintendo Black Star Promos"), 113)
+            tcggo_state["episodes_by_name"] = idx
+            print(f"[tcggo] episodes indexed: {len(idx)}", flush=True)
+        except Exception as e:
+            print(f"[tcggo] WARN episode index failed ({e!r}); TCGGO pack prices disabled.", flush=True)
+            tcggo_state["api_key"] = ""
+
+    groups_store: Dict[str, Any] = {"groups": None}
+    cache_dir = args.cache.resolve()
+
+    for set_row in data:
+        if not isinstance(set_row, dict):
+            continue
+        sc = str(set_row.get("set_code") or "").strip().lower()
+        if not args.all_sets and sc not in only:
+            continue
+        set_name = str(set_row.get("set_name") or sc)
+        print(f"[pack-costs] set={sc!r} name={set_name[:56]!r}", flush=True)
+        run_one_set(
+            set_row,
+            cache_dir=cache_dir,
+            prefer=str(args.prefer),
+            sleep_s=max(0.0, float(args.sleep)),
+            groups_store=groups_store,
+            tcggo_state=tcggo_state,
+            rep=rep,
+        )
+
+    write_json_atomic(out, data)
+    rep_path = dataset_sidecar_report_path(out, ".pack_costs_sync_report.json")
+    rep_path.parent.mkdir(parents=True, exist_ok=True)
+    rep_path.write_text(json.dumps(rep, indent=2), encoding="utf-8")
+    print(json.dumps(rep, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

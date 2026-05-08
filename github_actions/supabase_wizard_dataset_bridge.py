@@ -9,6 +9,8 @@ CI usage:
   python supabase_wizard_dataset_bridge.py apply-wizard --input pokemon_sets_data.json
   python scrape/gemrate_scraper.py --data pokemon_sets_data.json
   python supabase_wizard_dataset_bridge.py apply-gemrate --input pokemon_sets_data.json
+  python github_actions/sync_pack_costs.py --all-sets --cache tcg_cache
+  python supabase_wizard_dataset_bridge.py apply-pack-costs --input pokemon_sets_data.json
 
 Env (same as run_daily_api_queue / backup scripts):
   SUPABASE_URL
@@ -304,6 +306,55 @@ def apply_gemrate_from_json(input_path: Path) -> None:
     print(f"GemRate cards: updated_ok={ok} errors={err}", flush=True)
 
 
+PACK_COST_SET_KEYS = (
+    "tcgplayer_pack_price",
+    "pack_cost_primary_usd",
+    "pack_cost_method",
+    "pack_cost_sync_iso",
+    "pack_cost_breakdown",
+)
+
+
+def apply_pack_costs_from_json(input_path: Path) -> None:
+    raw = json.loads(input_path.read_text(encoding="utf-8"))
+    if not isinstance(raw, list):
+        raise SystemExit("pokemon_sets_data.json must be a list of sets")
+
+    client = _supabase()
+    now = datetime.now(timezone.utc).isoformat()
+    ok = 0
+    err = 0
+    skip = 0
+    for s in raw:
+        if not isinstance(s, dict):
+            continue
+        sc = str(s.get("set_code") or "").strip().lower()
+        if not sc:
+            continue
+        patch = {k: s[k] for k in PACK_COST_SET_KEYS if k in s}
+        if not patch:
+            skip += 1
+            continue
+        try:
+            res = client.table("pokemon_sets").select("metadata").eq("set_code", sc).limit(1).execute()
+            rows = res.data or []
+            if not rows:
+                err += 1
+                print(f"  skip: no pokemon_sets row for {sc!r}", flush=True)
+                continue
+            old_meta = rows[0].get("metadata") if isinstance(rows[0].get("metadata"), dict) else {}
+            new_meta = {**old_meta, **patch}
+            client.table("pokemon_sets").update({"metadata": new_meta, "last_synced_at": now}).eq(
+                "set_code", sc
+            ).execute()
+            ok += 1
+        except Exception as e:
+            err += 1
+            print(f"  set update failed {sc!r}: {e}", flush=True)
+
+    print(f"Pack costs: updated={ok} skipped_no_fields={skip} errors={err}", flush=True)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Supabase ↔ pokemon_sets_data.json bridge (Wizard + GemRate)")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -318,6 +369,9 @@ def main() -> int:
     g = sub.add_parser("apply-gemrate", help="Merge gemrate card metrics + set GemRate fields from JSON")
     g.add_argument("--input", type=Path, default=ROOT / "pokemon_sets_data.json")
 
+    p = sub.add_parser("apply-pack-costs", help="Merge pack cost fields from JSON into pokemon_sets.metadata")
+    p.add_argument("--input", type=Path, default=ROOT / "pokemon_sets_data.json")
+
     args = ap.parse_args()
     if args.cmd == "export":
         export_json(args.output.resolve())
@@ -325,6 +379,8 @@ def main() -> int:
         apply_wizard_from_json(args.input.resolve(), batch_size=max(1, int(args.batch_size)))
     elif args.cmd == "apply-gemrate":
         apply_gemrate_from_json(args.input.resolve())
+    elif args.cmd == "apply-pack-costs":
+        apply_pack_costs_from_json(args.input.resolve())
     else:
         return 1
     return 0
