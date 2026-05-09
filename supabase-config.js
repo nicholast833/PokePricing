@@ -4,49 +4,110 @@
 const SUPABASE_URL = "https://gjvamuavqruirrjajefj.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdqdmFtdWF2cXJ1aXJyamFqZWZqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc4Mzc5MjQsImV4cCI6MjA5MzQxMzkyNH0.JiAS1mPtxo-1qj9S7c2phFzCqZ3tXYCY8cNM8EsNTU0";
 
-// Helper function to fetch Sets and Cards from Supabase REST API (excluding heavy price history)
-async function fetchPokemonSetsFromSupabase() {
-    // We explicitly select the columns, omitting the massive `price_history` JSONB column.
-    const url = `${SUPABASE_URL}/rest/v1/pokemon_sets?select=*,pokemon_cards(unique_card_id,set_code,name,number,rarity,market_price,artist,image_url,metrics)`;
-    
-    const response = await fetch(url, {
-        headers: {
-            "apikey": SUPABASE_ANON_KEY,
-            "Authorization": `Bearer ${SUPABASE_ANON_KEY}`
+function _supabaseRestHeaders() {
+    return {
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+    };
+}
+
+/** Optional: dated pack history lives on ``pokemon_set_pack_pricing``, not in ``metadata`` (keeps list queries fast). */
+async function mergePackCostHistoryFromPackPricingTable(sets) {
+    if (!Array.isArray(sets) || !sets.length) return;
+    const headers = _supabaseRestHeaders();
+    const codes = [
+        ...new Set(
+            sets
+                .map((s) => String(s.set_code || '').trim().toLowerCase())
+                .filter(Boolean)
+        ),
+    ];
+    const chunkSize = 50;
+    const byCode = {};
+    for (let i = 0; i < codes.length; i += chunkSize) {
+        const part = codes.slice(i, i + chunkSize);
+        const url = `${SUPABASE_URL}/rest/v1/pokemon_set_pack_pricing?select=set_code,pack_cost_price_history,pack_cost_price_history_en&set_code=in.(${part.join(
+            ','
+        )})`;
+        const r = await fetch(url, { headers });
+        if (!r.ok) return;
+        const rows = await r.json();
+        if (!Array.isArray(rows)) return;
+        rows.forEach((row) => {
+            const sc = String(row.set_code || '').trim().toLowerCase();
+            if (sc) byCode[sc] = row;
+        });
+    }
+    sets.forEach((set) => {
+        const sc = String(set.set_code || '').trim().toLowerCase();
+        const row = byCode[sc];
+        if (!row) return;
+        if (Array.isArray(row.pack_cost_price_history) && row.pack_cost_price_history.length) {
+            set.pack_cost_price_history = row.pack_cost_price_history;
+        }
+        if (row.pack_cost_price_history_en && typeof row.pack_cost_price_history_en === 'object') {
+            set.pack_cost_price_history_en = row.pack_cost_price_history_en;
         }
     });
+}
 
-    if (!response.ok) {
-        throw new Error(`Supabase fetch failed: ${response.status} ${response.statusText}`);
+// Helper function to fetch Sets and Cards from Supabase REST API (excluding heavy price history)
+async function fetchPokemonSetsFromSupabase() {
+    // One request for all rows + embedded cards can exceed Postgres `statement_timeout` (HTTP 500 / code 57014).
+    // Page by set rows; order is stable for offset pagination.
+    const select =
+        '*,pokemon_cards(unique_card_id,set_code,name,number,rarity,market_price,artist,image_url,metrics)';
+    const pageSize = 25;
+    const headers = _supabaseRestHeaders();
+    const data = [];
+    for (let offset = 0; ; offset += pageSize) {
+        const url = `${SUPABASE_URL}/rest/v1/pokemon_sets?select=${encodeURIComponent(
+            select
+        )}&order=set_code.asc&limit=${pageSize}&offset=${offset}`;
+        const response = await fetch(url, { headers });
+        if (!response.ok) {
+            let detail = '';
+            try {
+                const errBody = await response.json();
+                if (errBody && errBody.message) detail = `: ${errBody.message}`;
+            } catch (e) {
+                /* ignore */
+            }
+            throw new Error(`Supabase fetch failed: ${response.status}${detail}`);
+        }
+        const batch = await response.json();
+        if (!Array.isArray(batch) || batch.length === 0) break;
+        data.push(...batch);
+        if (batch.length < pageSize) break;
     }
-
-    const data = await response.json();
     
     // The frontend expects the JSON structure from `pokemon_sets_data.json`.
     // We need to map `pokemon_cards` back to `top_25_cards`, and restore the flattened metrics.
-    return data.map(set => {
+    const mergedRows = data.map((set) => {
         // Map pokemon_cards -> top_25_cards
         const cards = set.pokemon_cards || [];
-        const top_25_cards = cards.map(c => {
-            // Reconstruct the original card object structure (without history arrays initially)
-            return {
-                ...c,
-                ...(c.metrics || {}) // Spread metrics back into the top level
-            };
-        });
+        const top_25_cards = cards.map((c) => ({
+            ...c,
+            ...(c.metrics || {}),
+        }));
 
-        // The JS currently filters / searches based on specific keys. We need to ensure
-        // the original JSON structure is perfectly recreated.
-        const merged = {
+        return {
             ...set,
-            ...(set.metadata || {}), // Spread set metadata (ev, rarity_counts) back into top level
-            top_25_cards: top_25_cards
+            ...(set.metadata || {}),
+            top_25_cards,
         };
-        if (typeof SHARED_UTILS !== 'undefined' && SHARED_UTILS.hydrateSetPackCostPipelineFields) {
-            SHARED_UTILS.hydrateSetPackCostPipelineFields(merged);
-        }
-        return merged;
     });
+    try {
+        await mergePackCostHistoryFromPackPricingTable(mergedRows);
+    } catch (e) {
+        console.warn('mergePackCostHistoryFromPackPricingTable skipped:', e);
+    }
+    mergedRows.forEach((m) => {
+        if (typeof SHARED_UTILS !== 'undefined' && SHARED_UTILS.hydrateSetPackCostPipelineFields) {
+            SHARED_UTILS.hydrateSetPackCostPipelineFields(m);
+        }
+    });
+    return mergedRows;
 }
 
 /**
@@ -62,12 +123,7 @@ async function fetchCardLiveRowFromSupabase(uniqueCardId) {
     ].join(',');
     const url = `${SUPABASE_URL}/rest/v1/pokemon_cards?unique_card_id=eq.${encodeURIComponent(uniqueCardId)}&select=${cols}`;
 
-    const response = await fetch(url, {
-        headers: {
-            apikey: SUPABASE_ANON_KEY,
-            Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
-        },
-    });
+    const response = await fetch(url, { headers: _supabaseRestHeaders() });
 
     if (!response.ok) {
         console.error(`Failed to fetch live row for ${uniqueCardId}: ${response.status}`);

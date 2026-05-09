@@ -514,7 +514,11 @@ document.addEventListener('DOMContentLoaded', () => {
         })
         .catch((error) => {
             console.error('Error loading dataset:', error);
-            loadingEl.innerHTML = `<p style="color: var(--warning);">Failed to load dataset from <code style="word-break:break-all;">${setsJsonUrl}</code>. Put <code>pokemon_sets_data.json</code> next to this page on the server and open the site over <strong>http(s)://</strong> (not file://). Check the browser console for details.</p>`;
+            const supa = error && error.message && String(error.message).includes('Supabase');
+            const hint = supa
+                ? `The live Supabase request failed (${error.message}). After deploying a fix, hard-refresh the page.`
+                : `Failed to load dataset from <code style="word-break:break-all;">${setsJsonUrl}</code>. Put <code>pokemon_sets_data.json</code> next to this page on the server and open the site over <strong>http(s)://</strong> (not file://).`;
+            loadingEl.innerHTML = `<p style="color: var(--warning);">${hint} Check the browser console for details.</p>`;
         })
         .finally(() => {
             if (pg) pg.end();

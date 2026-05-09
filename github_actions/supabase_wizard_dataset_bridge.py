@@ -314,12 +314,17 @@ def apply_gemrate_from_json(input_path: Path) -> None:
     print(f"GemRate cards: updated_ok={ok} errors={err}", flush=True)
 
 
+# Merged into pokemon_sets.metadata (keep small — large dated series belong in pokemon_set_pack_pricing only).
 PACK_COST_SET_KEYS = (
     "tcgplayer_pack_price",
     "pack_cost_primary_usd",
     "pack_cost_method",
     "pack_cost_sync_iso",
     "pack_cost_breakdown",
+)
+
+# Stripped from metadata on apply (and cleared) so old runs do not leave huge JSON in metadata.
+PACK_COST_METADATA_HISTORY_KEYS = (
     "pack_cost_price_history",
     "pack_cost_price_history_en",
 )
@@ -405,6 +410,8 @@ def apply_pack_costs_from_json(input_path: Path, *, upsert_pricing_table: bool =
                 continue
             old_meta = rows[0].get("metadata") if isinstance(rows[0].get("metadata"), dict) else {}
             new_meta = {**old_meta, **patch}
+            for _hk in PACK_COST_METADATA_HISTORY_KEYS:
+                new_meta.pop(_hk, None)
             client.table("pokemon_sets").update({"metadata": new_meta, "last_synced_at": now}).eq(
                 "set_code", sc
             ).execute()
@@ -436,7 +443,8 @@ def clear_pack_cost_metadata_from_db(
     clear_pricing_table: bool,
 ) -> None:
     """
-    Remove pack-cost fields merged into pokemon_sets.metadata (PACK_COST_SET_KEYS).
+    Remove pack-cost fields merged into pokemon_sets.metadata (PACK_COST_SET_KEYS and
+    PACK_COST_METADATA_HISTORY_KEYS).
     Use after bad pack-cost runs; re-run poll_pack_costs / apply-pack-costs to repopulate.
     """
     if bool(all_sets) == bool(set_codes):
@@ -469,11 +477,16 @@ def clear_pack_cost_metadata_from_db(
         if want is not None and sc not in want:
             continue
         old_meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
-        keys_hit = [k for k in PACK_COST_SET_KEYS if k in old_meta]
+        keys_hit = [
+            k
+            for k in (*PACK_COST_SET_KEYS, *PACK_COST_METADATA_HISTORY_KEYS)
+            if k in old_meta
+        ]
         if not keys_hit:
             skipped += 1
             continue
-        new_meta = {k: v for k, v in old_meta.items() if k not in PACK_COST_SET_KEYS}
+        _drop_keys = frozenset((*PACK_COST_SET_KEYS, *PACK_COST_METADATA_HISTORY_KEYS))
+        new_meta = {k: v for k, v in old_meta.items() if k not in _drop_keys}
         if dry_run:
             print(f"  [dry-run] would strip {sc!r}: {keys_hit}", flush=True)
             ok += 1
@@ -527,7 +540,7 @@ def main() -> int:
         description=textwrap.dedent(
             f"""
             Removes pack-cost fields that were copied into each set's JSON metadata
-            (keys: {", ".join(PACK_COST_SET_KEYS)}).
+            (keys: {", ".join((*PACK_COST_SET_KEYS, *PACK_COST_METADATA_HISTORY_KEYS))}).
 
             By default also deletes the matching row in {PACK_PRICING_TABLE!r} so the
             dashboard table does not keep stale numbers. Use --keep-pricing-table to
