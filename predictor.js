@@ -66,7 +66,9 @@ document.addEventListener('DOMContentLoaded', () => {
             const artistList = Array.isArray(artists) ? artists : [];
             // Build artist lookup
             artistList.forEach((a) => {
-                if (a.artist && a.chase_median) analyticsState.artistChaseLookup[a.artist] = a.chase_median;
+                const name = String(a.artist || a.Artist || '').trim();
+                const med = a.chase_median != null ? Number(a.chase_median) : Number(a.Median_Market_Price);
+                if (name && Number.isFinite(med) && med > 0) analyticsState.artistChaseLookup[name] = med;
             });
 
             // 1. Build Search Index & Training Rows

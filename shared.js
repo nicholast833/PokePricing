@@ -32,6 +32,18 @@ const SHARED_UTILS = {
             .replace(/"/g, '&quot;');
     },
 
+    /**
+     * Lowercase species token for regression sidecars (`species` / `volume_score`, `trends_score`).
+     * Mirrors predictor “similar cards” base name: strip common stage suffixes, then first word.
+     */
+    deriveExplorerSpeciesKeyFromCardName(name) {
+        const raw = name == null ? '' : String(name).trim();
+        if (!raw) return '';
+        const stripped = raw.replace(/\s+(VMAX|VSTAR|V|ex|EX|GX|LV\.X|MEGA|BREAK|δ)\b.*$/i, '').trim();
+        const tok = stripped.split(/\s+/)[0] || '';
+        return tok.length >= 2 ? tok.toLowerCase() : '';
+    },
+
     /** Release year from `set.release_date` (YYYY/… or YYYY-…), or ''. */
     gemrateReleaseYear(set) {
         const rd = set && set.release_date;

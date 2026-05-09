@@ -41,6 +41,12 @@ python -m http.server 8000.txt
 # Old / Local Scraper Folders
 _archive/
 data/
+# Allow predictor/analytics sidecars to be committed for GitHub Actions → Supabase sync
+!data/assets/
+!data/assets/character_premium_scores.json
+!data/assets/google_trends_momentum.json
+!data/assets/artist_scores.json
+!data/assets/tcg_macro_interest_by_year.json
 .cursor/
 scripts/
 # Track Wizard sync + tiny deps for GitHub Actions; ignore rest of scrape/

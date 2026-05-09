@@ -2,15 +2,22 @@
 """
 Upsert predictor/analytics sidecar JSON into Supabase ``predictor_analytics_assets``.
 
-Reads from (first hit):
-  - ``<repo>/data/assets/<name>.json``
-  - ``<repo>/scrape/output/<name>.json`` (optional fallback paths)
+Reads each file from the **first path that exists** (in order):
+
+  - ``$PREDICTOR_ANALYTICS_JSON_DIR/<name>.json`` if the env var is set (CI: point at a checkout or artifact dir)
+  - ``<repo>/data/assets/<name>.json`` (track these via ``.gitignore`` exceptions under ``data/assets/``)
+  - ``<repo>/scrape/output/<name>.json``
+  - ``<repo>/<name>.json`` (repo root)
+
+The repo ``.gitignore`` used to ignore all ``*.json`` and ``data/``; whitelisted paths under ``data/assets/`` exist so
+Actions checkouts can include the four sidecar files once you add them.
 
 Env (same as supabase_wizard_dataset_bridge): SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY or SUPABASE_KEY.
 
 Usage:
   python github_actions/sync_predictor_analytics_assets.py
   python github_actions/sync_predictor_analytics_assets.py --dry-run
+  python github_actions/sync_predictor_analytics_assets.py --strict   # exit 1 if any file missing
 """
 
 from __future__ import annotations
@@ -63,12 +70,23 @@ def _supabase():
     return create_client(url, key)
 
 
+def _candidate_paths(name: str) -> List[Path]:
+    extra = (os.environ.get("PREDICTOR_ANALYTICS_JSON_DIR") or "").strip()
+    out: List[Path] = []
+    if extra:
+        out.append(Path(extra).expanduser().resolve() / name)
+    out.extend(
+        [
+            ROOT / "data" / "assets" / name,
+            ROOT / "scrape" / "output" / name,
+            ROOT / name,
+        ]
+    )
+    return out
+
+
 def _read_json_file(name: str) -> Optional[Any]:
-    rels = [
-        ROOT / "data" / "assets" / name,
-        ROOT / "scrape" / "output" / name,
-    ]
-    for p in rels:
+    for p in _candidate_paths(name):
         if p.is_file():
             try:
                 return json.loads(p.read_text(encoding="utf-8"))
@@ -81,6 +99,11 @@ def _read_json_file(name: str) -> Optional[Any]:
 def main() -> int:
     ap = argparse.ArgumentParser(description="Sync predictor analytics JSON sidecars to Supabase")
     ap.add_argument("--dry-run", action="store_true", help="Print payloads sizes only; no DB writes")
+    ap.add_argument(
+        "--strict",
+        action="store_true",
+        help="Exit with code 1 unless all four JSON files are found (default: exit 0 when nothing to upload so CI stays green)",
+    )
     args = ap.parse_args()
 
     rows: List[Dict[str, Any]] = []
@@ -95,8 +118,15 @@ def main() -> int:
         print(f"  ok {key}: json chars ~{n}", flush=True)
 
     if not rows:
-        print("Nothing to upload (no JSON files found).", flush=True)
-        return 1
+        print(
+            "Nothing to upload (no JSON files found in data/assets/, scrape/output/, PREDICTOR_ANALYTICS_JSON_DIR, or repo root).",
+            flush=True,
+        )
+        print(
+            "  Add the four files under data/assets/ (see .gitignore whitelists) or set PREDICTOR_ANALYTICS_JSON_DIR.",
+            flush=True,
+        )
+        return 1 if args.strict else 0
 
     if args.dry_run:
         print(f"Dry-run: would upsert {len(rows)} row(s).", flush=True)

@@ -122,11 +122,15 @@ const REGRESSION_ENGINE = {
             feat.setAge = Math.sqrt(Math.max(0, years));
         }
 
-        // 6. tcgMacro
+        // 6. tcgMacro (flat year map, or nested { by_year } from tcg_macro_interest_by_year.json)
         if (set && set.release_date) {
             const yr = new Date(set.release_date).getFullYear();
-            const macro = analyticsState.tcgMacroInterest || {};
-            feat.tcgMacro = macro[yr] || 0;
+            const macroRaw = analyticsState.tcgMacroInterest || {};
+            const macro =
+                macroRaw.by_year && typeof macroRaw.by_year === 'object' ? macroRaw.by_year : macroRaw;
+            const yk = String(yr);
+            const v = macro[yr] ?? macro[yk];
+            feat.tcgMacro = v != null && Number.isFinite(Number(v)) ? Number(v) : 0;
         }
 
         // 7. gradedPop - Use shared helper for accuracy

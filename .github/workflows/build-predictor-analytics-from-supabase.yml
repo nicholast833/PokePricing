@@ -1,13 +1,12 @@
-name: Sync predictor analytics assets
+name: Build predictor analytics from Supabase
 
 on:
   workflow_dispatch:
   schedule:
-    # Weekly — adjust or add paths filter if these files rarely change
-    - cron: "0 6 * * 1"
+    - cron: "30 5 * * 2"
 
 jobs:
-  sync:
+  build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -20,11 +19,9 @@ jobs:
       - name: Install deps
         run: pip install -r github_actions/requirements.txt
 
-      - name: Upload sidecar JSON to Supabase
+      - name: Rebuild predictor_analytics_assets from card rows
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          # Optional: directory containing the four *.json files if not under data/assets/ in the repo
-          PREDICTOR_ANALYTICS_JSON_DIR: ${{ secrets.PREDICTOR_ANALYTICS_JSON_DIR }}
-        run: python github_actions/sync_predictor_analytics_assets.py
+        run: python github_actions/build_predictor_analytics_from_supabase.py

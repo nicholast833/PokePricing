@@ -86,10 +86,17 @@ async function fetchPokemonSetsFromSupabase() {
     const mergedRows = data.map((set) => {
         // Map pokemon_cards -> top_25_cards
         const cards = set.pokemon_cards || [];
-        const top_25_cards = cards.map((c) => ({
-            ...c,
-            ...(c.metrics || {}),
-        }));
+        const top_25_cards = cards.map((c) => {
+            const flat = {
+                ...c,
+                ...(c.metrics || {}),
+            };
+            if (typeof SHARED_UTILS !== 'undefined' && SHARED_UTILS.deriveExplorerSpeciesKeyFromCardName) {
+                const sk = SHARED_UTILS.deriveExplorerSpeciesKeyFromCardName(flat.name);
+                if (sk) flat.species = sk;
+            }
+            return flat;
+        });
 
         return {
             ...set,
@@ -145,6 +152,11 @@ function mergeLivePokemonCardRow(card, row) {
     if (row.market_price != null && row.market_price !== '') {
         const n = Number(row.market_price);
         if (Number.isFinite(n)) card.market_price = n;
+    }
+
+    if (typeof SHARED_UTILS !== 'undefined' && SHARED_UTILS.deriveExplorerSpeciesKeyFromCardName) {
+        const sk = SHARED_UTILS.deriveExplorerSpeciesKeyFromCardName(card.name);
+        if (sk) card.species = sk;
     }
 
     const ph = row.price_history;
