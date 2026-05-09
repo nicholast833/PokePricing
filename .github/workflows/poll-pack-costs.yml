@@ -1,25 +1,33 @@
-# Export sets from Supabase, recompute per-pack USD (TCGTracking Open API / tcg_cache + TCGCSV fallback),
-# optionally push pack fields into pokemon_sets.metadata.
+# Computes per-pack USD from TCGTracking / TCGCSV (+ optional TCGGO), then writes results to Supabase:
+#   - pokemon_sets.metadata (tcgplayer_pack_price, pack_cost_* — Explorer / export)
+#   - pokemon_set_pack_pricing (one row per set_code — queryable snapshot; run migration first)
 #
-# tcg_cache: run tcgtracking_merge locally (or CI) so each set has tcg_cache/{setId}/products.json + pricing.json.
-# Secrets: SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY (as SUPABASE_KEY) when applying to DB.
-# Optional: TCGPRO_API_KEY (RapidAPI) enables TCGGO /history-prices on the English booster-pack SKU.
-name: Poll pack costs (TCGTracking + TCGCSV + optional TCGGO)
+# No artifact upload: the DB is the deliverable. Logs still print sidecar path from sync_pack_costs locally.
+#
+# One-time: run SQL in supabase/migrations/20260208120000_pokemon_set_pack_pricing.sql (Supabase SQL editor).
+#
+# Secrets: SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY (as SUPABASE_KEY). Optional: TCGPRO_API_KEY for TCGGO.
+name: Poll pack costs (Supabase)
 
 on:
   workflow_dispatch:
     inputs:
       prefer:
-        description: "auto | single_pack | box_implied | etb_implied"
+        description: "auto | single_pack | box_implied | etb_implied | tcggo"
         type: choice
         options:
           - auto
           - single_pack
           - box_implied
           - etb_implied
+          - tcggo
         default: auto
       skip_supabase_push:
-        description: "Export + sync only; do not write pokemon_sets.metadata"
+        description: "Export + sync JSON only; do not write Supabase"
+        type: boolean
+        default: false
+      no_pricing_table:
+        description: "Apply metadata only; skip pokemon_set_pack_pricing upsert (migration missing)"
         type: boolean
         default: false
 
@@ -53,24 +61,19 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r github_actions/requirements.txt
 
-      - name: Export pokemon_sets_data.json from Supabase
-        run: python github_actions/supabase_wizard_dataset_bridge.py export --output pokemon_sets_data.json
-
-      - name: Sync pack costs
+      - name: Export → sync pack costs → apply to Supabase
         run: |
           set -euo pipefail
-          python github_actions/sync_pack_costs.py --all-sets --cache tcg_cache --sleep 0.12 --prefer "${{ inputs.prefer }}" --tcggo-history-days 180
-
-      - name: Apply pack costs to Supabase
-        if: ${{ inputs.skip_supabase_push == false }}
-        run: python github_actions/supabase_wizard_dataset_bridge.py apply-pack-costs --input pokemon_sets_data.json
-
-      - name: Upload outputs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: pack-costs-${{ github.run_id }}
-          if-no-files-found: warn
-          path: |
-            pokemon_sets_data.json
-            reports/dataset-sidecars/pokemon_sets_data.json.pack_costs_sync_report.json
+          EXTRA=
+          if [ "${{ inputs.skip_supabase_push }}" = "true" ]; then
+            EXTRA="--skip-supabase"
+          fi
+          PT=
+          if [ "${{ inputs.no_pricing_table }}" = "true" ]; then
+            PT="--no-pricing-table"
+          fi
+          python github_actions/poll_pack_costs_all_sets.py \
+            --prefer "${{ inputs.prefer }}" \
+            --tcggo-history-days 180 \
+            ${EXTRA} \
+            ${PT}

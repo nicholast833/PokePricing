@@ -9,8 +9,15 @@ CI usage:
   python supabase_wizard_dataset_bridge.py apply-wizard --input pokemon_sets_data.json
   python scrape/gemrate_scraper.py --data pokemon_sets_data.json
   python supabase_wizard_dataset_bridge.py apply-gemrate --input pokemon_sets_data.json
-  python github_actions/sync_pack_costs.py --all-sets --cache tcg_cache
+  python github_actions/poll_pack_costs_all_sets.py
   python supabase_wizard_dataset_bridge.py apply-pack-costs --input pokemon_sets_data.json
+
+Removing bad pack prices (wrong set matched, etc.):
+  1) Preview:  python github_actions/supabase_wizard_dataset_bridge.py clear-pack-cost-metadata --set-codes base1 --dry-run
+  2) Apply:    python github_actions/supabase_wizard_dataset_bridge.py clear-pack-cost-metadata --set-codes base1
+  3) Fix data: run poll_pack_costs_all_sets.py (or export + sync_pack_costs + apply-pack-costs) again.
+
+  To wipe pack fields for every set that still has them: add --all instead of --set-codes.
 
 Env (same as run_daily_api_queue / backup scripts):
   SUPABASE_URL
@@ -20,6 +27,7 @@ Env (same as run_daily_api_queue / backup scripts):
 from __future__ import annotations
 
 import argparse
+import textwrap
 import json
 import os
 import sys
@@ -314,8 +322,42 @@ PACK_COST_SET_KEYS = (
     "pack_cost_breakdown",
 )
 
+# Dedicated table (see supabase/migrations/20260208120000_pokemon_set_pack_pricing.sql) for queries / dashboards.
+PACK_PRICING_TABLE = "pokemon_set_pack_pricing"
 
-def apply_pack_costs_from_json(input_path: Path) -> None:
+
+def _pack_pricing_table_row(set_row: Dict[str, Any], *, synced_at_iso: str) -> Dict[str, Any]:
+    sc = str(set_row.get("set_code") or "").strip().lower()
+    bd = set_row.get("pack_cost_breakdown") if isinstance(set_row.get("pack_cost_breakdown"), dict) else {}
+    sp = bd.get("single_booster_pack") if isinstance(bd.get("single_booster_pack"), dict) else {}
+    pid = sp.get("product_id")
+    pid_i: Optional[int] = None
+    if pid is not None:
+        try:
+            pid_i = int(pid)
+        except (TypeError, ValueError):
+            pid_i = None
+    return {
+        "set_code": sc,
+        "synced_at": synced_at_iso,
+        "tcgplayer_pack_price": set_row.get("tcgplayer_pack_price"),
+        "pack_cost_primary_usd": set_row.get("pack_cost_primary_usd"),
+        "pack_cost_method": set_row.get("pack_cost_method"),
+        "pack_cost_sync_iso": set_row.get("pack_cost_sync_iso"),
+        "pack_cost_breakdown": bd,
+        "tcgplayer_booster_pack_product_id": pid_i,
+    }
+
+
+def _pack_pricing_table_available(client: Client) -> bool:
+    try:
+        client.table(PACK_PRICING_TABLE).select("set_code").limit(1).execute()
+        return True
+    except Exception:
+        return False
+
+
+def apply_pack_costs_from_json(input_path: Path, *, upsert_pricing_table: bool = True) -> None:
     raw = json.loads(input_path.read_text(encoding="utf-8"))
     if not isinstance(raw, list):
         raise SystemExit("pokemon_sets_data.json must be a list of sets")
@@ -325,6 +367,15 @@ def apply_pack_costs_from_json(input_path: Path) -> None:
     ok = 0
     err = 0
     skip = 0
+    pricing_rows: List[Dict[str, Any]] = []
+    table_ok = bool(upsert_pricing_table) and _pack_pricing_table_available(client)
+    if upsert_pricing_table and not table_ok:
+        print(
+            f"Note: table {PACK_PRICING_TABLE!r} not reachable (create via supabase/migrations); "
+            "metadata-only updates will still run.",
+            flush=True,
+        )
+
     for s in raw:
         if not isinstance(s, dict):
             continue
@@ -332,6 +383,8 @@ def apply_pack_costs_from_json(input_path: Path) -> None:
         if not sc:
             continue
         patch = {k: s[k] for k in PACK_COST_SET_KEYS if k in s}
+        if not patch and isinstance(s.get("pack_cost_breakdown"), dict):
+            patch = {"pack_cost_breakdown": s["pack_cost_breakdown"]}
         if not patch:
             skip += 1
             continue
@@ -348,11 +401,90 @@ def apply_pack_costs_from_json(input_path: Path) -> None:
                 "set_code", sc
             ).execute()
             ok += 1
+            if table_ok:
+                pricing_rows.append(_pack_pricing_table_row(s, synced_at_iso=now))
         except Exception as e:
             err += 1
             print(f"  set update failed {sc!r}: {e}", flush=True)
 
-    print(f"Pack costs: updated={ok} skipped_no_fields={skip} errors={err}", flush=True)
+    print(f"Pack costs (pokemon_sets.metadata): updated={ok} skipped_no_fields={skip} errors={err}", flush=True)
+
+    if table_ok and pricing_rows:
+        batch_n = 80
+        try:
+            for i in range(0, len(pricing_rows), batch_n):
+                chunk = pricing_rows[i : i + batch_n]
+                client.table(PACK_PRICING_TABLE).upsert(chunk, on_conflict="set_code").execute()
+            print(f"Pack costs ({PACK_PRICING_TABLE}): upserted {len(pricing_rows)} row(s)", flush=True)
+        except Exception as e:
+            print(f"Pack costs ({PACK_PRICING_TABLE}) upsert failed: {e!r}", flush=True)
+
+
+def clear_pack_cost_metadata_from_db(
+    *,
+    set_codes: Optional[set[str]],
+    all_sets: bool,
+    dry_run: bool,
+    clear_pricing_table: bool,
+) -> None:
+    """
+    Remove pack-cost fields merged into pokemon_sets.metadata (PACK_COST_SET_KEYS).
+    Use after bad pack-cost runs; re-run poll_pack_costs / apply-pack-costs to repopulate.
+    """
+    if bool(all_sets) == bool(set_codes):
+        raise SystemExit(
+            "Choose scope: either --all (every set that has pack-cost keys in metadata) "
+            "or --set-codes base1,gym2 (comma list). Do not pass both."
+        )
+
+    client = _supabase()
+    now = datetime.now(timezone.utc).isoformat()
+    table_ok = clear_pricing_table and _pack_pricing_table_available(client)
+    if clear_pricing_table and not table_ok:
+        print(
+            f"Note: {PACK_PRICING_TABLE!r} not available; metadata strip only.",
+            flush=True,
+        )
+
+    print("Fetching pokemon_sets ...", flush=True)
+    rows = _fetch_paginated(client, "pokemon_sets", "set_code,metadata", order="set_code")
+    want = None if all_sets else set_codes
+    ok = 0
+    skipped = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        sc = str(row.get("set_code") or "").strip().lower()
+        if not sc:
+            skipped += 1
+            continue
+        if want is not None and sc not in want:
+            continue
+        old_meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        keys_hit = [k for k in PACK_COST_SET_KEYS if k in old_meta]
+        if not keys_hit:
+            skipped += 1
+            continue
+        new_meta = {k: v for k, v in old_meta.items() if k not in PACK_COST_SET_KEYS}
+        if dry_run:
+            print(f"  [dry-run] would strip {sc!r}: {keys_hit}", flush=True)
+            ok += 1
+            continue
+        try:
+            client.table("pokemon_sets").update({"metadata": new_meta, "last_synced_at": now}).eq(
+                "set_code", sc
+            ).execute()
+            ok += 1
+            if table_ok:
+                client.table(PACK_PRICING_TABLE).delete().eq("set_code", sc).execute()
+        except Exception as e:
+            print(f"  failed {sc!r}: {e!r}", flush=True)
+
+    mode = "all sets" if all_sets else f"{len(want or [])} set_code(s)"
+    print(
+        f"clear-pack-cost-metadata ({mode}): updated={ok} skipped_no_pack_fields={skipped} dry_run={dry_run}",
+        flush=True,
+    )
 
 
 def main() -> int:
@@ -369,8 +501,62 @@ def main() -> int:
     g = sub.add_parser("apply-gemrate", help="Merge gemrate card metrics + set GemRate fields from JSON")
     g.add_argument("--input", type=Path, default=ROOT / "pokemon_sets_data.json")
 
-    p = sub.add_parser("apply-pack-costs", help="Merge pack cost fields from JSON into pokemon_sets.metadata")
+    p = sub.add_parser(
+        "apply-pack-costs",
+        help="Merge pack cost fields into pokemon_sets.metadata and upsert pokemon_set_pack_pricing",
+    )
     p.add_argument("--input", type=Path, default=ROOT / "pokemon_sets_data.json")
+    p.add_argument(
+        "--no-pricing-table",
+        action="store_true",
+        help=f"Skip upsert to {PACK_PRICING_TABLE} (use if migration not applied yet)",
+    )
+
+    c = sub.add_parser(
+        "clear-pack-cost-metadata",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        help="Delete mistaken pack-price fields from Supabase (metadata + optional pricing table row).",
+        description=textwrap.dedent(
+            f"""
+            Removes pack-cost fields that were copied into each set's JSON metadata
+            (keys: {", ".join(PACK_COST_SET_KEYS)}).
+
+            By default also deletes the matching row in {PACK_PRICING_TABLE!r} so the
+            dashboard table does not keep stale numbers. Use --keep-pricing-table to
+            only clean pokemon_sets.metadata.
+
+            After this command, pack prices are gone until you run the pack-cost pipeline
+            again (e.g. github_actions/poll_pack_costs_all_sets.py).
+
+            Scope (pick exactly one):
+              --set-codes base1,gym1   only these set_code values
+              --all                    every set that currently has any of the keys above in metadata
+
+            Always use --dry-run first if you are unsure which rows will change.
+            """
+        ).strip(),
+    )
+    c.add_argument(
+        "--all",
+        action="store_true",
+        help="Process every set: strip pack keys from metadata wherever they exist.",
+    )
+    c.add_argument(
+        "--set-codes",
+        default="",
+        metavar="CODES",
+        help="Comma-separated set_code list, e.g. base1,gym2 (lowercase ok).",
+    )
+    c.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="List which keys would be removed per set; do not write to the database.",
+    )
+    c.add_argument(
+        "--keep-pricing-table",
+        action="store_true",
+        help=f"Only update pokemon_sets.metadata; leave {PACK_PRICING_TABLE} unchanged.",
+    )
 
     args = ap.parse_args()
     if args.cmd == "export":
@@ -380,7 +566,18 @@ def main() -> int:
     elif args.cmd == "apply-gemrate":
         apply_gemrate_from_json(args.input.resolve())
     elif args.cmd == "apply-pack-costs":
-        apply_pack_costs_from_json(args.input.resolve())
+        apply_pack_costs_from_json(
+            args.input.resolve(),
+            upsert_pricing_table=not bool(getattr(args, "no_pricing_table", False)),
+        )
+    elif args.cmd == "clear-pack-cost-metadata":
+        only = {x.strip().lower() for x in str(getattr(args, "set_codes", "") or "").split(",") if x.strip()}
+        clear_pack_cost_metadata_from_db(
+            set_codes=only if only else None,
+            all_sets=bool(getattr(args, "all", False)),
+            dry_run=bool(getattr(args, "dry_run", False)),
+            clear_pricing_table=not bool(getattr(args, "keep_pricing_table", False)),
+        )
     else:
         return 1
     return 0

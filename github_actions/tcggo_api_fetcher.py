@@ -227,6 +227,30 @@ def extract_latest_market_price(tcggo_response: Dict[str, Any]) -> Optional[floa
                 continue
     return None
 
+
+def extract_latest_cm_low(tcggo_response: Dict[str, Any]) -> Optional[float]:
+    """Most recent non-null ``cm_low`` from a /history-prices payload (often Cardmarket EUR)."""
+    if not tcggo_response or "data" not in tcggo_response:
+        return None
+    data = tcggo_response["data"]
+    if not isinstance(data, dict) or not data:
+        return None
+    for date_key in sorted(data.keys(), reverse=True):
+        row = data.get(date_key)
+        if not isinstance(row, dict):
+            continue
+        v = row.get("cm_low")
+        if v is None:
+            continue
+        try:
+            p = float(v)
+        except (TypeError, ValueError):
+            continue
+        if p > 0:
+            return p
+    return None
+
+
 def extract_full_price_history(tcggo_response: Dict[str, Any]) -> list:
     """
     Extracts the complete price history as a list of {date, price_usd, cm_low} entries.
