@@ -229,20 +229,14 @@ document.addEventListener('DOMContentLoaded', () => {
         renderCardHero(card, set);
         renderReasoning(card, predictedPrice, actualPrice, feat, cal);
 
-        // Fetch price_history on-demand and merge into card object
-        if (card.unique_card_id && typeof fetchCardPriceHistory === 'function') {
+        if (card.unique_card_id && typeof fetchCardLiveRowFromSupabase === 'function') {
             try {
-                const ph = await fetchCardPriceHistory(card.unique_card_id);
-                if (ph && typeof ph === 'object') {
-                    // Merge price_history fields into the card so chart builders can find them
-                    if (ph.tcggo_market_history) card.tcggo_market_history = ph.tcggo_market_history;
-                    if (ph.pokemon_wizard_price_history) card.pokemon_wizard_price_history = ph.pokemon_wizard_price_history;
-                    if (ph.collectrics_price_history) card.collectrics_price_history = ph.collectrics_price_history;
-                    if (ph.collectrics_history_ebay) card.collectrics_history_ebay = ph.collectrics_history_ebay;
-                    if (ph.collectrics_history_justtcg) card.collectrics_history_justtcg = ph.collectrics_history_justtcg;
+                const row = await fetchCardLiveRowFromSupabase(card.unique_card_id);
+                if (row && typeof mergeLivePokemonCardRow === 'function') {
+                    mergeLivePokemonCardRow(card, row);
                 }
             } catch (e) {
-                console.warn('Failed to fetch price history for predictor:', e);
+                console.warn('Failed to fetch Supabase live card row for predictor:', e);
             }
         }
 

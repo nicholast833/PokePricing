@@ -320,6 +320,8 @@ PACK_COST_SET_KEYS = (
     "pack_cost_method",
     "pack_cost_sync_iso",
     "pack_cost_breakdown",
+    "pack_cost_price_history",
+    "pack_cost_price_history_en",
 )
 
 # Dedicated table (see supabase/migrations/20260208120000_pokemon_set_pack_pricing.sql) for queries / dashboards.
@@ -345,6 +347,12 @@ def _pack_pricing_table_row(set_row: Dict[str, Any], *, synced_at_iso: str) -> D
         "pack_cost_method": set_row.get("pack_cost_method"),
         "pack_cost_sync_iso": set_row.get("pack_cost_sync_iso"),
         "pack_cost_breakdown": bd,
+        "pack_cost_price_history": set_row.get("pack_cost_price_history")
+        if isinstance(set_row.get("pack_cost_price_history"), list)
+        else [],
+        "pack_cost_price_history_en": set_row.get("pack_cost_price_history_en")
+        if isinstance(set_row.get("pack_cost_price_history_en"), dict)
+        else None,
         "tcgplayer_booster_pack_product_id": pid_i,
     }
 

@@ -11,10 +11,15 @@ Estimate English **per-booster-pack USD** for each set in pokemon_sets_data.json
    ``GET /history-prices`` with ``tcgplayer_id`` or internal product ``id`` per
    https://www.tcggo.com/api-docs/v1/ — pairs with the TCGPlayer product id from (1)/(2).
 
+Per-set **pack cost history** (``pack_cost_price_history`` + ``pack_cost_price_history_en``) mirrors
+card ``tcggo_market_history`` / ``price_history_en.daily``: dated ``price_usd`` (TCGPlayer market),
+``cm_low`` (USD-normalized), and derived ``high`` / ``low`` / ``mid`` when both sources exist for a day.
+
 Selection priority (``--prefer auto`` when ``--tcggo-key`` or ``TCGPRO_API_KEY`` is set):
-  - **TCGGO** episode primary SKUs: /history-prices on internal product id (``tcg_player_market`` USD, else
-    ``cm_low`` converted from EUR using the public constant ``TCGGO_CARDMARKET_EUR_TO_USD`` (approximate).
-    Cardmarket ``lowest`` on the list response is not used as USD (it is usually EUR).
+  - **TCGGO** episode primary SKUs: ``/history-prices`` on internal product id (``tcg_player_market`` as USD, else
+    ``cm_low`` converted from EUR via ``TCGGO_CARDMARKET_EUR_TO_USD``). Metadata stores ``history_usd`` (up to
+    ``TCGGO_HISTORY_USD_MAX_POINTS`` newest days) with ``tcg_player_market_usd`` / ``cm_low_usd`` only — no EUR
+    amounts in exported breakdown fields. Cardmarket ``lowest`` on the episode list payload is not used as USD.
   - TCGCSV catalog is ignored when the chosen booster product name does not match ``set_name`` tokens.
   - Else single-pack / ETB / booster-box logic from Tracking + validated TCGCSV (unchanged).
 
@@ -31,6 +36,7 @@ import json
 import os
 import re
 import shutil
+import statistics
 import sys
 import unicodedata
 import time
@@ -68,6 +74,187 @@ HEAD = {"User-Agent": "Mozilla/5.0 PokemonTCG-Explorer/sync_pack_costs (hobbyist
 
 # Approximate EUR→USD for TCGGO Cardmarket ``cm_low`` when ``tcg_player_market`` is null (public constant, not a secret).
 TCGGO_CARDMARKET_EUR_TO_USD = 1.09
+
+# Most recent daily points to keep in pack_cost_breakdown.tcggo (avoids huge JSON in Supabase metadata).
+TCGGO_HISTORY_USD_MAX_POINTS = 150
+
+
+def _interchange_pack_history_from_history_usd(
+    history_usd: List[Dict[str, Any]],
+    *,
+    sync_iso: str,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """
+    Turn TCGGO ``history_usd`` rows (``date``, ``tcg_player_market_usd``, ``cm_low_usd``) into:
+
+    1. ``pack_cost_price_history`` — ascending by date, same spirit as ``tcggo_market_history`` on cards
+       (``date``, ``price_usd``, ``cm_low``, optional ``high_usd`` / ``low_usd`` / ``mid_usd`` per day).
+    2. ``pack_cost_price_history_en`` — same envelope as ``card.tcggo.price_history_en``:
+       ``{ currency, daily: { 'YYYY-MM-DD': { tcg_player_market, cm_low, high, low, mid } }, sync_iso, source }``.
+    """
+    if not isinstance(history_usd, list) or not history_usd:
+        return [], {}
+    asc = list(reversed(history_usd))
+    points: List[Dict[str, Any]] = []
+    daily: Dict[str, Any] = {}
+    for r in asc:
+        if not isinstance(r, dict):
+            continue
+        d = str(r.get("date") or "").strip()[:10]
+        if len(d) < 10:
+            continue
+        pt: Dict[str, Any] = {"date": d}
+        vals: List[float] = []
+        tpm = r.get("tcg_player_market_usd")
+        if tpm is not None:
+            try:
+                v = float(tpm)
+                if v > 0:
+                    pt["price_usd"] = round(v, 4)
+                    vals.append(v)
+            except (TypeError, ValueError):
+                pass
+        cm = r.get("cm_low_usd")
+        if cm is not None:
+            try:
+                v = float(cm)
+                if v > 0:
+                    pt["cm_low_usd"] = round(v, 4)
+                    pt["cm_low"] = round(v, 4)
+                    vals.append(v)
+            except (TypeError, ValueError):
+                pass
+        for rk, pk in (
+            ("tcg_player_high_usd", "high_usd"),
+            ("tcg_player_low_usd", "low_usd"),
+            ("tcg_player_mid_usd", "mid_usd"),
+        ):
+            v = r.get(rk)
+            if v is None:
+                continue
+            try:
+                fv = float(v)
+                if fv > 0:
+                    pt[pk] = round(fv, 4)
+            except (TypeError, ValueError):
+                pass
+        if "high_usd" not in pt and len(vals) >= 2:
+            pt["high_usd"] = round(max(vals), 4)
+            pt["low_usd"] = round(min(vals), 4)
+            pt["mid_usd"] = round(statistics.mean(vals), 4)
+        elif "high_usd" not in pt and len(vals) == 1:
+            v = vals[0]
+            pt["high_usd"] = pt["low_usd"] = pt["mid_usd"] = round(v, 4)
+        if len(pt) <= 1:
+            continue
+        points.append(pt)
+        slot: Dict[str, Any] = {}
+        if "price_usd" in pt:
+            slot["tcg_player_market"] = pt["price_usd"]
+        if "cm_low" in pt:
+            slot["cm_low"] = pt["cm_low"]
+        if "high_usd" in pt:
+            slot["high"] = pt["high_usd"]
+            slot["low"] = pt["low_usd"]
+            slot["mid"] = pt["mid_usd"]
+        if slot:
+            daily[d] = slot
+    if not points:
+        return [], {}
+    en: Dict[str, Any] = {
+        "currency": "USD",
+        "daily": daily,
+        "sync_iso": sync_iso,
+        "source": "tcggo_pack_history",
+    }
+    return points, en
+
+
+def _collect_history_usd_lists_from_tcggo_block(tg: Any) -> List[List[Dict[str, Any]]]:
+    out: List[List[Dict[str, Any]]] = []
+    if not isinstance(tg, dict):
+        return out
+    sel = tg.get("selected")
+    if isinstance(sel, dict):
+        hu = sel.get("history_usd")
+        if isinstance(hu, list) and hu:
+            out.append(hu)
+    leg = tg.get("legacy")
+    if isinstance(leg, dict):
+        hu = leg.get("history_usd")
+        if isinstance(hu, list) and hu:
+            out.append(hu)
+        sel2 = leg.get("selected")
+        if isinstance(sel2, dict):
+            hu2 = sel2.get("history_usd")
+            if isinstance(hu2, list) and hu2:
+                out.append(hu2)
+    po = tg.get("primary_only")
+    if isinstance(po, dict):
+        out.extend(_collect_history_usd_lists_from_tcggo_block(po))
+    return out
+
+
+def _best_pack_history_usd_from_breakdown(breakdown: Any) -> Optional[List[Dict[str, Any]]]:
+    """Longest ``history_usd`` list found under ``pack_cost_breakdown.tcggo``."""
+    bd = breakdown if isinstance(breakdown, dict) else {}
+    tg = bd.get("tcggo")
+    lists = _collect_history_usd_lists_from_tcggo_block(tg)
+    if not lists:
+        return None
+    lists.sort(key=len, reverse=True)
+    return lists[0]
+
+
+def _tcggo_history_series_usd(hist: Dict[str, Any], *, cm_low_is_eur: bool) -> List[Dict[str, Any]]:
+    """
+    Full /history-prices ``data`` map as a list of USD-normalized rows (newest dates first).
+    ``tcg_player_market`` is treated as USD. ``cm_low`` is multiplied by TCGGO_CARDMARKET_EUR_TO_USD when *cm_low_is_eur*.
+    """
+    data = hist.get("data") if isinstance(hist, dict) else None
+    if not isinstance(data, dict) or not data:
+        return []
+    rate = float(TCGGO_CARDMARKET_EUR_TO_USD)
+    keys = sorted(data.keys(), reverse=True)[:TCGGO_HISTORY_USD_MAX_POINTS]
+    out: List[Dict[str, Any]] = []
+    for dk in keys:
+        row = data.get(dk)
+        if not isinstance(row, dict):
+            continue
+        ent: Dict[str, Any] = {"date": str(dk)}
+        tpm = row.get("tcg_player_market")
+        if tpm is not None:
+            try:
+                v = float(tpm)
+                if v > 0:
+                    ent["tcg_player_market_usd"] = round(v, 4)
+            except (TypeError, ValueError):
+                pass
+        cm = row.get("cm_low")
+        if cm is not None:
+            try:
+                v = float(cm)
+                if v > 0:
+                    ent["cm_low_usd"] = round(v * rate, 4) if cm_low_is_eur else round(v, 4)
+            except (TypeError, ValueError):
+                pass
+        for src, dst in (
+            ("tcg_player_high", "tcg_player_high_usd"),
+            ("tcg_player_low", "tcg_player_low_usd"),
+            ("tcg_player_mid", "tcg_player_mid_usd"),
+        ):
+            v = row.get(src)
+            if v is None:
+                continue
+            try:
+                fv = float(v)
+            except (TypeError, ValueError):
+                continue
+            if fv > 0:
+                ent[dst] = round(fv, 4)
+        if len(ent) > 1:
+            out.append(ent)
+    return out
 
 _PACKS_IN_NAME_RE = re.compile(r"(\d+)\s*(?:booster\s+packs?|packs?\s*&\s*booster)", re.I)
 
@@ -142,9 +329,14 @@ def _fetch_tcggo_pack_market_usd(
         hist = fetch_tcggo_price_history_query(
             api_key, days=history_days, tcgplayer_id=int(pack_tcgplayer_pid)
         )
+        if isinstance(hist, dict):
+            ser = _tcggo_history_series_usd(hist, cm_low_is_eur=True)
+            if ser:
+                meta["history_usd"] = ser
         v = extract_latest_market_price(hist) if hist else None
         if v is not None:
             meta["path"] = "history_prices.tcgplayer_id"
+            meta["values_are_usd"] = True
             return float(v), meta
     except Exception as ex:
         meta["tcgplayer_id_error"] = str(ex)[:240]
@@ -173,9 +365,14 @@ def _fetch_tcggo_pack_market_usd(
     meta["tcggo_product_id"] = int(internal)
     try:
         hist2 = fetch_tcggo_price_history_query(api_key, days=history_days, tcggo_id=int(internal))
+        if isinstance(hist2, dict):
+            ser2 = _tcggo_history_series_usd(hist2, cm_low_is_eur=True)
+            if ser2:
+                meta["history_usd"] = ser2
         v2 = extract_latest_market_price(hist2) if hist2 else None
         if v2 is not None:
             meta["path"] = "history_prices.tcggo_internal_id"
+            meta["values_are_usd"] = True
             return float(v2), meta
     except Exception as ex:
         meta["internal_id_error"] = str(ex)[:240]
@@ -314,9 +511,14 @@ def _tcggo_history_usd_for_internal_id(
         return None, meta
     if not isinstance(hist, dict):
         return None, meta
+    cm_low_is_eur = (currency_hint or "EUR").strip().upper() == "EUR"
+    series = _tcggo_history_series_usd(hist, cm_low_is_eur=cm_low_is_eur)
+    if series:
+        meta["history_usd"] = series
     usd = extract_latest_market_price(hist)
     if usd is not None:
         meta["price_source"] = "tcg_player_market"
+        meta["values_are_usd"] = True
         return float(usd), meta
     cm = extract_latest_cm_low(hist)
     if cm is None:
@@ -324,13 +526,13 @@ def _tcggo_history_usd_for_internal_id(
         return None, meta
     cur = (currency_hint or "EUR").strip().upper()
     meta["price_source"] = "cm_low"
-    meta["cm_low_raw"] = float(cm)
-    meta["currency"] = cur
+    meta["values_are_usd"] = True
     if cur == "EUR":
         out = round(float(cm) * float(TCGGO_CARDMARKET_EUR_TO_USD), 4)
-        meta["approx_usd_from_eur"] = out
+        meta["cm_low_usd"] = out
         return out, meta
-    meta["note"] = "non_eur_cm_low_used_as_usd"
+    meta["note"] = "cm_low_treated_as_usd"
+    meta["cm_low_usd"] = round(float(cm), 4)
     return float(cm), meta
 
 
@@ -379,6 +581,12 @@ def _tcggo_primary_pack_usd_from_episode(
         if prev is None or len(name) < len(str(prev.get("name") or "")):
             cands[kind] = cand
 
+    cands_public = {
+        k: {"name": str(v.get("name") or ""), "tcggo_product_id": int(v["tcggo_product_id"])}
+        for k, v in cands.items()
+        if isinstance(v, dict)
+    }
+
     priority = ("single_booster_pack", "sleeved_booster", "elite_trainer_box", "booster_box")
     for k in priority:
         cand = cands.get(k)
@@ -407,12 +615,12 @@ def _tcggo_primary_pack_usd_from_episode(
         }
         br: Dict[str, Any] = {
             "path": "episode_products.primary_history",
-            "candidates": cands,
+            "candidates": cands_public,
             "selected_kind": k,
             "selected": sel,
         }
         return implied, br
-    return None, {"path": "episode_products.no_primary_match", "candidates": cands}
+    return None, {"path": "episode_products.no_primary_match", "candidates": cands_public}
 
 
 def _http_json(url: str, *, timeout: int = 90) -> Any:
@@ -509,6 +717,8 @@ def _clear_pack_cost_fields(set_row: Dict[str, Any]) -> None:
         "pack_cost_method",
         "pack_cost_sync_iso",
         "pack_cost_breakdown",
+        "pack_cost_price_history",
+        "pack_cost_price_history_en",
     ):
         set_row.pop(k, None)
 
@@ -874,6 +1084,18 @@ def run_one_set(
     set_row["pack_cost_sync_iso"] = iso
     set_row["pack_cost_breakdown"] = breakdown
     set_row["pack_cost_method"] = method
+    hist_usd = _best_pack_history_usd_from_breakdown(breakdown)
+    if hist_usd:
+        pts, en = _interchange_pack_history_from_history_usd(hist_usd, sync_iso=iso)
+        if pts:
+            set_row["pack_cost_price_history"] = pts
+            set_row["pack_cost_price_history_en"] = en
+        else:
+            set_row["pack_cost_price_history"] = []
+            set_row["pack_cost_price_history_en"] = {}
+    else:
+        set_row["pack_cost_price_history"] = []
+        set_row["pack_cost_price_history_en"] = {}
     if primary is not None:
         set_row["pack_cost_primary_usd"] = round(float(primary), 4)
         set_row["tcgplayer_pack_price"] = round(float(primary), 2)

@@ -1,11 +1,24 @@
-import re
+"""eBay helpers for GitHub Actions.
+
+**Finding API** ``findCompletedItems``: legacy sold/completed search; often returns **zero**
+results for new keys, GitHub Actions IPs, or policy limits. **Buy Browse** cannot return sold
+items — only **active** listings (OAuth: ``EBAY_APP_ID`` + ``EBAY_CERT_ID``).
+
+``run_daily_api_queue`` uses **Buy Browse** via ``fetch_ebay_active_listing_snapshot`` (hit
+``total`` plus a few listing snippets for the UI).
+"""
+
+import base64
 import json
-import urllib.request
-import urllib.parse
-import urllib.error
+import os
+import re
 import time
+import urllib.parse
+import urllib.request
 from datetime import datetime, timezone, timedelta
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
+
+import requests
 
 FINDING_BASE = "https://svcs.ebay.com/services/search/FindingService/v1"
 GRADED_KEYWORDS = frozenset(["psa", "cgc", "bgs", "beckett", "ace", "pca", "graded", "gem mint"])
@@ -195,3 +208,186 @@ def fetch_ebay_sold_listings(keywords: str, app_id: str, days: int = 30) -> Dict
         "graded": [x for x in merged if _is_graded(x["title"])],
         "ungraded": [x for x in merged if not _is_graded(x["title"])]
     }
+
+
+def _ebay_api_base() -> str:
+    if (os.environ.get("EBAY_USE_SANDBOX") or "").strip().lower() in ("1", "true", "yes"):
+        return "https://api.sandbox.ebay.com"
+    return "https://api.ebay.com"
+
+
+def fetch_ebay_application_token(app_id: str, cert_id: str) -> Tuple[str, int]:
+    """
+    Client-credentials token for Buy Browse (same as scrape/sync_ebay_browse_listings).
+    Requires EBAY_APP_ID (OAuth client_id) and EBAY_CERT_ID (client_secret).
+    Returns ``(access_token, expires_in_seconds)``.
+    """
+    scope = (os.environ.get("EBAY_OAUTH_SCOPE") or "https://api.ebay.com/oauth/api_scope").strip()
+    url = f"{_ebay_api_base()}/identity/v1/oauth2/token"
+    basic = base64.b64encode(f"{app_id}:{cert_id}".encode("utf-8")).decode("ascii")
+    resp = requests.post(
+        url,
+        data={"grant_type": "client_credentials", "scope": scope},
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Authorization": f"Basic {basic}",
+            "User-Agent": "PokemonTCG-Explorer/github_actions (Buy Browse)",
+        },
+        timeout=45,
+    )
+    if resp.status_code != 200:
+        raise RuntimeError(f"eBay OAuth HTTP {resp.status_code}: {resp.text[:500]}")
+    data = resp.json()
+    tok = data.get("access_token")
+    if not tok:
+        raise RuntimeError(f"eBay OAuth missing access_token: {data!r}")
+    exp = int(data.get("expires_in", 7200) or 7200)
+    return str(tok), exp
+
+
+_OAUTH_CACHE: Dict[str, Any] = {"app_id": "", "cert_id": "", "token": "", "exp_mono": 0.0}
+
+
+def _get_browse_oauth_token(app_id: str, cert_id: str) -> str:
+    """Reuse one application token across many Browse searches (daily queue)."""
+    now = time.monotonic()
+    if (
+        _OAUTH_CACHE["token"]
+        and _OAUTH_CACHE["app_id"] == app_id
+        and _OAUTH_CACHE["cert_id"] == cert_id
+        and now < _OAUTH_CACHE["exp_mono"]
+    ):
+        return str(_OAUTH_CACHE["token"])
+    tok, exp = fetch_ebay_application_token(app_id, cert_id)
+    _OAUTH_CACHE.update(
+        {
+            "app_id": app_id,
+            "cert_id": cert_id,
+            "token": tok,
+            "exp_mono": now + max(120.0, float(exp) - 120.0),
+        }
+    )
+    return tok
+
+
+def invalidate_browse_oauth_cache() -> None:
+    _OAUTH_CACHE["token"] = ""
+    _OAUTH_CACHE["exp_mono"] = 0.0
+
+
+def _browse_snippet(hit: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if not isinstance(hit, dict):
+        return None
+    out: Dict[str, Any] = {}
+    title = hit.get("title")
+    if title:
+        out["title"] = str(title)[:240]
+    url = hit.get("itemWebUrl")
+    if url:
+        out["url"] = str(url)
+    price = hit.get("price") if isinstance(hit.get("price"), dict) else {}
+    val = price.get("value")
+    if val is not None:
+        try:
+            out["price_value"] = float(val)
+        except (TypeError, ValueError):
+            out["price_value"] = val
+    cur = price.get("currency")
+    if cur:
+        out["price_currency"] = str(cur)
+    if not out.get("title") and not out.get("url"):
+        return None
+    return out
+
+
+def fetch_ebay_active_listing_snapshot(
+    keywords: str,
+    *,
+    app_id: str,
+    cert_id: str,
+    limit: int = 5,
+    marketplace_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    **Buy Browse API** — active listings only (eBay does not expose completed sales here).
+
+    Returns total hit count (``total`` from API) and up to ``limit`` compact listing rows
+    for UI snapshots. Use this in CI instead of Finding ``findCompletedItems``, which is
+    legacy and often returns empty for new keys / datacenter IPs.
+    """
+    mp = (marketplace_id or os.environ.get("EBAY_MARKETPLACE_ID") or "EBAY_US").strip()
+    token = _get_browse_oauth_token(app_id, cert_id)
+    qenc = urllib.parse.urlencode(
+        {"q": keywords[:350], "limit": str(max(1, min(int(limit), 50)))}
+    )
+    url = f"{_ebay_api_base()}/buy/browse/v1/item_summary/search?{qenc}"
+    resp = requests.get(
+        url,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "X-EBAY-C-MARKETPLACE-ID": mp,
+            "Content-Type": "application/json",
+            "User-Agent": "PokemonTCG-Explorer/github_actions (Buy Browse)",
+        },
+        timeout=45,
+    )
+    if resp.status_code == 401:
+        invalidate_browse_oauth_cache()
+        token = _get_browse_oauth_token(app_id, cert_id)
+        resp = requests.get(
+            url,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "X-EBAY-C-MARKETPLACE-ID": mp,
+                "Content-Type": "application/json",
+                "User-Agent": "PokemonTCG-Explorer/github_actions (Buy Browse)",
+            },
+            timeout=45,
+        )
+    out: Dict[str, Any] = {
+        "http_status": resp.status_code,
+        "search_url": "https://www.ebay.com/sch/i.html?" + urllib.parse.urlencode({"_nkw": keywords[:350]}),
+        "total": None,
+        "snapshots": [],
+        "raw_error": None,
+    }
+    try:
+        data = resp.json()
+    except Exception:
+        out["raw_error"] = resp.text[:800]
+        return out
+
+    if resp.status_code != 200:
+        out["raw_error"] = str(data)[:800]
+        return out
+
+    tot = data.get("total")
+    if tot is not None:
+        try:
+            out["total"] = int(tot)
+        except (TypeError, ValueError):
+            out["total"] = tot
+
+    summaries = data.get("itemSummaries") if isinstance(data.get("itemSummaries"), list) else []
+    snaps: List[Dict[str, Any]] = []
+    for raw in summaries[: max(1, min(int(limit), 50))]:
+        sn = _browse_snippet(raw) if isinstance(raw, dict) else None
+        if sn:
+            snaps.append(sn)
+    out["snapshots"] = snaps
+    return out
+
+
+def build_ebay_active_search_query(card: Dict[str, Any]) -> str:
+    """Browse search string aligned with ``sync_ebay_browse_listings.build_search_query`` when set_name is missing."""
+    set_code = str(card.get("set_code") or "").strip()
+    name = str(card.get("name") or "").strip()
+    num = str(card.get("number") or "").strip()
+    metrics = card.get("metrics") if isinstance(card.get("metrics"), dict) else {}
+    set_name = str(metrics.get("set_name") or metrics.get("set_title") or "").strip()
+    if not set_name:
+        set_name = set_code
+    parts = ["Pokemon TCG", set_name, name, f"#{num}" if num else ""]
+    q = " ".join(p for p in parts if p and p != "#")
+    q = re.sub(r"\s+", " ", q).strip()
+    return q[:350]

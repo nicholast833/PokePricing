@@ -44,7 +44,9 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(SCRIPT_DIR))
+sys.path.insert(0, str(ROOT / "scrape"))
 
+from dataset_report_paths import dataset_sidecar_report_path  # noqa: E402
 from json_atomic_util import write_json_atomic  # noqa: E402
 
 DEFAULT_ENV = SCRIPT_DIR / "ebay_listing_checker.env"
@@ -420,7 +422,8 @@ def main() -> int:
         "ebay_browse_item_summaries is a compact copy of returned item summaries (active listings, not sold history). "
         "Sold time series: use collectrics_history_ebay / PriceCharting, not Browse item_summary/search."
     )
-    rep_path = out.parent / (out.name + ".ebay_browse_sync_report.json")
+    rep_path = dataset_sidecar_report_path(out, ".ebay_browse_sync_report.json")
+    rep_path.parent.mkdir(parents=True, exist_ok=True)
     rep_path.write_text(json.dumps(rep, indent=2), encoding="utf-8")
     print(json.dumps(rep, indent=2), flush=True)
     print("Wrote", rep_path, flush=True)

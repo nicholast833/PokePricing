@@ -43,7 +43,9 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(SCRIPT_DIR))
+sys.path.insert(0, str(ROOT / "scrape"))
 
+from dataset_report_paths import dataset_sidecar_report_path  # noqa: E402
 from json_atomic_util import write_json_atomic  # noqa: E402
 
 try:
@@ -314,7 +316,8 @@ def main() -> int:
         force_empty=bool(args.force_empty),
     )
 
-    rep_path = out.parent / (out.name + ".ebay_sold_sync_report.json")
+    rep_path = dataset_sidecar_report_path(out, ".ebay_sold_sync_report.json")
+    rep_path.parent.mkdir(parents=True, exist_ok=True)
     rep_path.write_text(json.dumps(rep, indent=2), encoding="utf-8")
     print(json.dumps(rep, indent=2), flush=True)
     print("Wrote report ->", rep_path, flush=True)

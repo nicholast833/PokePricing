@@ -5515,22 +5515,6 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     });
 
-    function resolveDataAssetUrl(filename) {
-        const u = new URL(window.location.href);
-        let path = u.pathname || '/';
-        if (!path.endsWith('/')) {
-            const seg = path.slice(path.lastIndexOf('/') + 1);
-            if (seg.includes('.')) {
-                path = path.slice(0, path.lastIndexOf('/') + 1) || '/';
-            } else {
-                path = `${path}/`;
-            }
-        }
-        const clean = String(filename).replace(/^\//, '');
-        u.pathname = (path.endsWith('/') ? path : `${path}/`) + clean;
-        return u.href;
-    }
-
     const SPECIES_POPULARITY_RENDER_CAP = 450;
     let speciesPopularityFilterWired = false;
 
@@ -5540,7 +5524,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function fetchJsonOptionalDocument(filename, fetchOpts) {
-        const url = resolveDataAssetUrl(filename);
+        const url = SHARED_UTILS.resolveDataAssetUrl(filename);
         try {
             const r = await fetch(url, fetchOpts);
             if (!r.ok) {
@@ -5560,7 +5544,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const filt = document.getElementById('speciesPopularityFilter');
         if (!tbody) return;
         if (!doc || !Array.isArray(doc.species)) {
-            tbody.innerHTML = '<tr><td colspan="7">No <code>species_popularity_list.json</code> — run <code>python scrape/build_species_popularity_index.py</code> in the project root.</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="7">No <code>data/assets/species_popularity_list.json</code> — run <code>python scrape/build_species_popularity_index.py</code> in the project root.</td></tr>';
             if (meta) meta.textContent = '';
             return;
         }
@@ -5625,7 +5609,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             /** Optional JSON: missing / bad file yields [] (304 and other non-OK must not wipe silently for required files) */
             const fetchJsonOptional = (path) => {
-                const url = resolveDataAssetUrl(path);
+                const url = SHARED_UTILS.resolveDataAssetUrl(path);
                 return fetch(url, fetchOpts)
                     .then(r => {
                         if (!r.ok) {
@@ -5644,7 +5628,7 @@ document.addEventListener('DOMContentLoaded', () => {
             };
 
             async function fetchRequiredJsonArray(path, label) {
-                const url = resolveDataAssetUrl(path);
+                const url = SHARED_UTILS.resolveDataAssetUrl(path);
                 const r = await fetch(url, fetchOpts);
                 if (!r.ok) {
                     throw new Error(`${label}: HTTP ${r.status} ${r.statusText || ''} for ${url}`);
@@ -5818,7 +5802,7 @@ document.addEventListener('DOMContentLoaded', () => {
             });
         } catch (error) {
             console.error(error);
-            const tried = resolveDataAssetUrl('pokemon_sets_data.json');
+            const tried = SHARED_UTILS.resolveDataAssetUrl('pokemon_sets_data.json');
             const detail = error && error.message ? escapeLoadingHtml(error.message) : String(error);
             loadingEl.innerHTML = `<p style="color:#ef4444;">Failed to load datasets.</p><p style="color:#fca5a5;font-size:0.9rem;margin-top:0.5rem;font-weight:600;">${detail}</p><p style="color:#94a3b8;font-size:0.85rem;margin-top:0.5rem;">Sets URL: <code style="word-break:break-all;">${escapeLoadingHtml(tried)}</code></p>`;
         } finally {

@@ -42,6 +42,9 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function initCardDetailCharts(card, chartOpts) {
+        if (typeof SHARED_UTILS !== 'undefined' && SHARED_UTILS.hydrateCardPipelineFields) {
+            SHARED_UTILS.hydrateCardPipelineFields(card);
+        }
         if (typeof Chart === 'undefined') return;
         const co = chartOpts && typeof chartOpts === 'object' ? chartOpts : {};
         let histMo = co.historyWindowMonths != null ? Number(co.historyWindowMonths) : NaN;
@@ -414,15 +417,14 @@ document.addEventListener('DOMContentLoaded', () => {
         modalCardPanel.innerHTML = '<div style="padding: 2rem; text-align: center; color: #94a3b8; font-size: 0.9rem;">Fetching live market charts...</div>';
         modalEl.style.display = 'flex';
         
-        if (card.unique_card_id && !card._has_price_history) {
+        if (card.unique_card_id && typeof fetchCardLiveRowFromSupabase === 'function') {
             try {
-                const historyObj = await fetchCardPriceHistory(card.unique_card_id);
-                if (historyObj) {
-                    Object.assign(card, historyObj);
+                const row = await fetchCardLiveRowFromSupabase(card.unique_card_id);
+                if (row && typeof mergeLivePokemonCardRow === 'function') {
+                    mergeLivePokemonCardRow(card, row);
                 }
-                card._has_price_history = true;
             } catch (e) {
-                console.error("Failed to fetch card history:", e);
+                console.error('Failed to fetch Supabase live card row:', e);
             }
         }
         
@@ -487,23 +489,7 @@ document.addEventListener('DOMContentLoaded', () => {
         openCardDetailModal(btn.dataset.setCode, btn.dataset.cardNumber, btn.dataset.cardName || '');
     });
 
-    function resolveDataAssetUrl(filename) {
-        const u = new URL(window.location.href);
-        let path = u.pathname || '/';
-        if (!path.endsWith('/')) {
-            const seg = path.slice(path.lastIndexOf('/') + 1);
-            if (seg.includes('.')) {
-                path = path.slice(0, path.lastIndexOf('/') + 1) || '/';
-            } else {
-                path = `${path}/`;
-            }
-        }
-        const clean = String(filename).replace(/^\//, '');
-        u.pathname = (path.endsWith('/') ? path : `${path}/`) + clean;
-        return u.href;
-    }
-
-    const setsJsonUrl = resolveDataAssetUrl('pokemon_sets_data.json');
+    const setsJsonUrl = SHARED_UTILS.resolveDataAssetUrl('pokemon_sets_data.json');
     const pg = typeof window.PTCG_PAGE_PROGRESS !== 'undefined' ? window.PTCG_PAGE_PROGRESS : null;
     if (pg) pg.begin();
 

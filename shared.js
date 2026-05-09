@@ -2,6 +2,16 @@
  * shared.js - common utilities for Predictor, Analytics, and Explorer 
  */
 
+/** Bundled analytics JSON served from `data/assets/` (repo layout). Not for `pokemon_sets_data.json` (stays at site root). */
+const BUNDLED_DATA_ASSET_BASENAMES = new Set([
+    'character_premium_scores.json',
+    'google_trends_momentum.json',
+    'artist_scores.json',
+    'nostalgia_index.json',
+    'species_popularity_list.json',
+    'tcg_macro_interest_by_year.json',
+]);
+
 const SHARED_UTILS = {
     fmtUsd(x) {
         const v = Number(x);
@@ -74,8 +84,15 @@ const SHARED_UTILS = {
                 path = `${path}/`;
             }
         }
-        const clean = String(filename).replace(/^\//, '');
-        u.pathname = (path.endsWith('/') ? path : `${path}/`) + clean;
+        let rel = String(filename).replace(/^\//, '').replace(/\\/g, '/');
+        if (!/(^|\/)data\/assets\//i.test(rel)) {
+            const slash = rel.lastIndexOf('/');
+            const base = slash >= 0 ? rel.slice(slash + 1) : rel;
+            if (BUNDLED_DATA_ASSET_BASENAMES.has(base)) {
+                rel = `data/assets/${base}`;
+            }
+        }
+        u.pathname = (path.endsWith('/') ? path : `${path}/`) + rel;
         return u.href;
     },
 
@@ -1582,9 +1599,104 @@ const SHARED_UTILS = {
         return { labels, vals };
     },
 
+    /**
+     * Normalizes Supabase / GitHub Actions pipeline fields onto the same shape as static JSON:
+     * - Builds `card.tcggo.price_history_en.daily` from `tcggo_market_history` for the market score panel.
+     * - Maps `ebay_active_*` (Buy Browse snapshot from Actions) onto `ebay_browse_*` for the eBay UI block.
+     */
+    /**
+     * Builds ``set.pack_cost_price_history_en`` from ``pack_cost_price_history`` when the pipeline
+     * only stored the array (matches card ``tcggo_market_history`` → ``price_history_en.daily``).
+     */
+    hydrateSetPackCostPipelineFields(set) {
+        if (!set || typeof set !== 'object') return;
+        const arr = Array.isArray(set.pack_cost_price_history) ? set.pack_cost_price_history : null;
+        const enExisting = set.pack_cost_price_history_en;
+        const hasEn = enExisting && typeof enExisting === 'object' && enExisting.daily && typeof enExisting.daily === 'object'
+            && Object.keys(enExisting.daily).length > 0;
+        if (!arr || !arr.length || hasEn) return;
+        const daily = {};
+        arr.forEach((row) => {
+            if (!row || typeof row !== 'object') return;
+            const d = String(row.date || '').trim().slice(0, 10);
+            if (d.length < 10) return;
+            const slot = {};
+            if (row.price_usd != null && Number.isFinite(Number(row.price_usd))) {
+                slot.tcg_player_market = Number(row.price_usd);
+            }
+            if (row.cm_low != null && Number.isFinite(Number(row.cm_low))) {
+                slot.cm_low = Number(row.cm_low);
+            }
+            ['high_usd', 'low_usd', 'mid_usd'].forEach((k, i) => {
+                const alt = ['high', 'low', 'mid'][i];
+                if (row[k] != null && Number.isFinite(Number(row[k]))) slot[alt] = Number(row[k]);
+            });
+            if (Object.keys(slot).length) daily[d] = slot;
+        });
+        if (!Object.keys(daily).length) return;
+        set.pack_cost_price_history_en = {
+            currency: 'USD',
+            daily,
+            sync_iso: set.pack_cost_sync_iso || new Date().toISOString(),
+            source: 'tcggo_pack_history',
+        };
+    },
+
+    hydrateCardPipelineFields(card) {
+        if (!card || typeof card !== 'object') return;
+
+        const hist = Array.isArray(card.tcggo_market_history) ? card.tcggo_market_history : null;
+        const dailyExisting = card.tcggo && card.tcggo.price_history_en && card.tcggo.price_history_en.daily;
+        const hasDaily = dailyExisting && typeof dailyExisting === 'object' && Object.keys(dailyExisting).length > 0;
+        if (hist && hist.length && !hasDaily) {
+            const daily = {};
+            hist.forEach((row) => {
+                if (!row || typeof row !== 'object') return;
+                const d = String(row.date || '').trim().slice(0, 10);
+                if (d.length < 10) return;
+                const slot = {};
+                if (row.price_usd != null && Number.isFinite(Number(row.price_usd))) {
+                    slot.tcg_player_market = Number(row.price_usd);
+                }
+                if (row.cm_low != null && Number.isFinite(Number(row.cm_low))) {
+                    slot.cm_low = Number(row.cm_low);
+                }
+                if (Object.keys(slot).length) daily[d] = slot;
+            });
+            const tid = (card.tcggo && card.tcggo.id != null) ? card.tcggo.id : card.tcggo_id;
+            card.tcggo = Object.assign({}, card.tcggo || {}, {
+                id: tid != null ? tid : card.tcggo && card.tcggo.id,
+                price_history_en: {
+                    currency: 'USD',
+                    daily,
+                    sync_iso: card.last_synced_at || new Date().toISOString(),
+                },
+            });
+        }
+
+        if (card.ebay_active_sync_iso && !card.ebay_browse_sync_iso) {
+            card.ebay_browse_sync_iso = card.ebay_active_sync_iso;
+            if (card.ebay_active_total != null) card.ebay_browse_result_total = card.ebay_active_total;
+            if (Array.isArray(card.ebay_active_snapshots)) {
+                card.ebay_browse_item_summaries = card.ebay_active_snapshots;
+            }
+            if (card.ebay_active_search_url && String(card.ebay_active_search_url).trim()) {
+                card.ebay_browse_search_url = String(card.ebay_active_search_url).trim();
+            }
+            let q = '';
+            try {
+                const u = new URL(card.ebay_active_search_url);
+                q = decodeURIComponent(u.searchParams.get('_nkw') || '').trim();
+            } catch (e) { /* ignore */ }
+            if (q) card.ebay_browse_query = q;
+        }
+    },
+
     /** eBay web search URL for the same Browse query (all hits), from sync or rebuilt from `ebay_browse_query`. */
     ebaySchSearchUrlFromCard(card) {
         if (!card) return '';
+        const au = card.ebay_active_search_url;
+        if (au && String(au).trim()) return String(au).trim();
         const su = card.ebay_browse_search_url;
         if (su && String(su).trim()) return String(su).trim();
         const q = card.ebay_browse_query;
@@ -2428,6 +2540,7 @@ const SHARED_UTILS = {
      * @param {object} opts.chartIdMode `'explorer'` (fixed canvas ids for index.html modal) or `'dynamic'` (predictor / shared.initCardDetailCharts).
      */
     buildCardDetailExplorerPanelHtml(card, set, opts) {
+        SHARED_UTILS.hydrateCardPipelineFields(card);
         const chartIdMode = opts && opts.chartIdMode === 'dynamic' ? 'dynamic' : 'explorer';
         const hidePredictorLink = Boolean(opts && opts.hidePredictorLink);
         const esc = SHARED_UTILS.escHtml;
@@ -2476,6 +2589,10 @@ const SHARED_UTILS = {
         }
         if (card.tcgtracking_match && String(card.tcgtracking_match) !== 'ok') {
             statRows.push({ lbl: 'TCG match', val: esc(String(card.tcgtracking_match)) });
+        }
+        const tgLatest = Number(card.tcggo_latest_market_usd);
+        if (Number.isFinite(tgLatest) && tgLatest > 0) {
+            statRows.push({ lbl: 'TCGGO / API latest', val: fmt(tgLatest) });
         }
         // eBay Sold prices (last sale) — merge scrape / Finding + optional ScrapeChain `ebay_sold_observations`
         const allEbaySold = SHARED_UTILS.ebaySoldRowsDeduped(card);
@@ -2721,6 +2838,22 @@ const SHARED_UTILS = {
             <div class="card-detail-liquidity-strip">
                 ${statsStrip}
             </div>` : '';
+
+        let tcggoEbayApiBlock = '';
+        const tgp = card.tcggo_ebay_sold_prices;
+        if (Array.isArray(tgp) && tgp.length) {
+            const syn = card.tcggo_ebay_sold_sync_iso
+                ? `<p class="card-detail-sub" style="margin-bottom:0.5rem;">Synced <code>${esc(String(card.tcggo_ebay_sold_sync_iso))}</code></p>`
+                : '';
+            const body = esc(JSON.stringify(tgp, null, 2));
+            tcggoEbayApiBlock = `
+            <div class="card-detail-section">
+                <h4>TCGGO eBay sold <span style="font-weight:400;color:#94a3b8;">(API)</span></h4>
+                ${syn}
+                <pre style="margin:0;font-size:0.68rem;line-height:1.35;max-height:200px;overflow:auto;background:rgba(15,23,42,0.6);border:1px solid rgba(148,163,184,0.25);border-radius:6px;padding:0.5rem;color:#cbd5e1;">${body}</pre>
+            </div>`;
+        }
+
         const tcggoScoreBlock = SHARED_UTILS.buildTcggoStyleScorecardHtml(card);
 
         const marketRowHtml = wizardBlock || ebayBrowseBlock
@@ -2758,6 +2891,7 @@ const SHARED_UTILS = {
                 </div>
             </div>
             ${marketLiquidityBlock}
+            ${tcggoEbayApiBlock}
             ${tcggoScoreBlock}
             ${bodyMainHtml}
             ${foot}
@@ -2888,6 +3022,7 @@ const SHARED_UTILS = {
     },
 
     initCardDetailCharts(card, containerCharts, chartOpts) {
+        SHARED_UTILS.hydrateCardPipelineFields(card);
         if (typeof Chart === 'undefined') return;
         const co = chartOpts && typeof chartOpts === 'object' ? chartOpts : {};
         let histMo = co.historyWindowMonths != null ? Number(co.historyWindowMonths) : NaN;

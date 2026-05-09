@@ -69,11 +69,12 @@ def run_queue():
     
     # 2. Process each card
     from tcggo_api_fetcher import fetch_tcggo_price_history, extract_latest_market_price, extract_full_price_history, fetch_tcggo_ebay_sold
-    from ebay_api_fetcher import fetch_ebay_sold_listings
-    
+    from ebay_api_fetcher import build_ebay_active_search_query, fetch_ebay_active_listing_snapshot
+
     # Check multiple possible environment variable names for the API key
     tcgpro_key = os.environ.get("TCGPRO_API_KEY") or os.environ.get("RAPIDAPI_KEY_TCGGO") or os.environ.get("RAPIDAPI_KEY")
-    ebay_app_id = os.environ.get("EBAY_APP_ID")
+    ebay_app_id = (os.environ.get("EBAY_APP_ID") or "").strip()
+    ebay_cert_id = (os.environ.get("EBAY_CERT_ID") or "").strip()
     
     if not tcgpro_key:
         logging.warning("WARNING: No TCGPRO_API_KEY found in environment variables! TCGGO data will be skipped.")
@@ -139,21 +140,38 @@ def run_queue():
                 elif not tcgpro_key:
                     logging.error("  -> Skipping TCGGO: TCGPRO_API_KEY is empty or missing from environment!")
 
-            # --- 3. eBay Finding API (fallback for raw sold listings) ---
-            if ebay_app_id:
-                number_str = f" {card.get('number', '')}" if card.get('number') else ""
-                query = f"{name}{number_str} pokemon"
-                logging.info(f"  -> Fetching eBay Finding API for '{query}'")
-                sales = fetch_ebay_sold_listings(query, ebay_app_id, days=30)
-                
-                if sales['graded'] or sales['ungraded']:
-                    logging.info(f"  -> eBay Finding: {len(sales['graded'])} graded, {len(sales['ungraded'])} ungraded sales.")
-                    metrics['ebay_sold_history_graded'] = sales['graded']
-                    metrics['ebay_sold_history_ungraded'] = sales['ungraded']
-                    metrics['ebay_sold_sync_iso'] = today_iso
-                    updates_made = True
-                else:
-                    logging.info(f"  -> eBay Finding: 0 sold listings for '{query}'")
+            # --- 3. eBay Buy Browse (active listings only) ---
+            # Finding API findCompletedItems is legacy; many apps/GitHub IPs see empty results.
+            # Browse returns total active matches + item summaries (OAuth: APP_ID + CERT_ID).
+            if ebay_app_id and ebay_cert_id:
+                row_for_q = {"set_code": set_code, "name": name, "number": card.get("number"), "metrics": metrics}
+                query = build_ebay_active_search_query(row_for_q)
+                logging.info(f"  -> eBay Browse (active) q={query[:120]!r}")
+                try:
+                    snap = fetch_ebay_active_listing_snapshot(
+                        query, app_id=ebay_app_id, cert_id=ebay_cert_id, limit=5
+                    )
+                    st = snap.get("http_status")
+                    tot = snap.get("total")
+                    n_sn = len(snap.get("snapshots") or [])
+                    if st == 200:
+                        logging.info(f"  -> eBay Browse: HTTP {st} total={tot!r} snapshots={n_sn}")
+                        metrics["ebay_active_total"] = tot
+                        metrics["ebay_active_snapshots"] = snap.get("snapshots") or []
+                        metrics["ebay_active_search_url"] = snap.get("search_url")
+                        metrics["ebay_active_sync_iso"] = today_iso
+                        metrics["ebay_active_source"] = "buy_browse"
+                        updates_made = True
+                    else:
+                        logging.warning(
+                            f"  -> eBay Browse: HTTP {st} total={tot!r} err={str(snap.get('raw_error'))[:200]!r}"
+                        )
+                except Exception as e:
+                    logging.error(f"  -> eBay Browse failed: {e}")
+            elif ebay_app_id and not ebay_cert_id:
+                logging.warning(
+                    "  -> Skipping eBay Browse: EBAY_CERT_ID missing (OAuth client_secret required for active listings)."
+                )
 
             # --- 3. Update Supabase ---
             current_time = datetime.datetime.now(datetime.timezone.utc).isoformat()

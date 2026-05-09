@@ -1,0 +1,50 @@
+# Refreshes marketplace fields on every set's top_25_cards in pokemon_sets_data.json
+# (TCGPlayer mp-search-api, then eBay Buy Browse). Optional slow eBay sold scrape via dispatch input.
+#
+# Does not commit changes; add a commit step if you want the JSON pushed from CI.
+name: Poll tracked cards (all sets)
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_ebay_sold:
+        description: "Include eBay sold HTML scrape (can take many hours)"
+        type: boolean
+        default: false
+  # Uncomment if you want a recurring full-catalog poll (watch API limits).
+  # schedule:
+  #   - cron: '0 12 * * 0'  # Weekly Sun 12:00 UTC
+
+jobs:
+  poll_tracked_cards:
+    runs-on: ubuntu-latest
+
+    concurrency:
+      group: poll-tracked-cards-all-sets
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r github_actions/requirements.txt
+
+      - name: Poll all sets (top_25_cards)
+        env:
+          EBAY_APP_ID: ${{ secrets.EBAY_APP_ID }}
+          EBAY_CERT_ID: ${{ secrets.EBAY_CERT_ID }}
+        run: |
+          EXTRA=
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.run_ebay_sold }}" = "true" ]; then
+            EXTRA="--ebay-sold"
+          fi
+          python github_actions/poll_tracked_cards_all_sets.py ${EXTRA}

@@ -37,35 +37,77 @@ async function fetchPokemonSetsFromSupabase() {
 
         // The JS currently filters / searches based on specific keys. We need to ensure
         // the original JSON structure is perfectly recreated.
-        return {
+        const merged = {
             ...set,
             ...(set.metadata || {}), // Spread set metadata (ev, rarity_counts) back into top level
             top_25_cards: top_25_cards
         };
+        if (typeof SHARED_UTILS !== 'undefined' && SHARED_UTILS.hydrateSetPackCostPipelineFields) {
+            SHARED_UTILS.hydrateSetPackCostPipelineFields(merged);
+        }
+        return merged;
     });
 }
 
-// Fetches the heavy price_history JSONB column for a specific card on-demand
-async function fetchCardPriceHistory(uniqueCardId) {
-    // In PostgREST, we filter by unique_card_id using `?unique_card_id=eq.YOUR_ID`
-    // We only select the price_history column.
-    const url = `${SUPABASE_URL}/rest/v1/pokemon_cards?unique_card_id=eq.${encodeURIComponent(uniqueCardId)}&select=price_history`;
-    
+/**
+ * Fetches live columns written by GitHub Actions / scripts: `price_history`, `metrics`,
+ * plus scalar fields used by the Explorer / Predictor UI.
+ */
+async function fetchCardLiveRowFromSupabase(uniqueCardId) {
+    const cols = [
+        'price_history',
+        'metrics',
+        'market_price',
+        'last_synced_at',
+    ].join(',');
+    const url = `${SUPABASE_URL}/rest/v1/pokemon_cards?unique_card_id=eq.${encodeURIComponent(uniqueCardId)}&select=${cols}`;
+
     const response = await fetch(url, {
         headers: {
-            "apikey": SUPABASE_ANON_KEY,
-            "Authorization": `Bearer ${SUPABASE_ANON_KEY}`
-        }
+            apikey: SUPABASE_ANON_KEY,
+            Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+        },
     });
 
     if (!response.ok) {
-        console.error(`Failed to fetch history for ${uniqueCardId}: ${response.status}`);
+        console.error(`Failed to fetch live row for ${uniqueCardId}: ${response.status}`);
         return null;
     }
 
     const data = await response.json();
     if (!data || data.length === 0) return null;
-    
-    // The data is an array of 1 row, and we want the `price_history` object inside it.
-    return data[0].price_history;
+    return data[0];
+}
+
+/** Merges a `pokemon_cards` REST row onto the in-memory card object (flat + nested helpers). */
+function mergeLivePokemonCardRow(card, row) {
+    if (!card || !row || typeof row !== 'object') return;
+
+    if (row.last_synced_at != null && row.last_synced_at !== '') {
+        card.last_synced_at = row.last_synced_at;
+    }
+    if (row.market_price != null && row.market_price !== '') {
+        const n = Number(row.market_price);
+        if (Number.isFinite(n)) card.market_price = n;
+    }
+
+    const ph = row.price_history;
+    if (ph && typeof ph === 'object') {
+        Object.keys(ph).forEach((k) => {
+            card[k] = ph[k];
+        });
+    }
+
+    const m = row.metrics;
+    if (m && typeof m === 'object') {
+        Object.keys(m).forEach((k) => {
+            card[k] = m[k];
+        });
+    }
+}
+
+/** @deprecated Use fetchCardLiveRowFromSupabase + mergeLivePokemonCardRow */
+async function fetchCardPriceHistory(uniqueCardId) {
+    const row = await fetchCardLiveRowFromSupabase(uniqueCardId);
+    return row && row.price_history ? row.price_history : null;
 }
