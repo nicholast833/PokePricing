@@ -208,6 +208,95 @@ def _infer_packs_in_sealed(name: str) -> Optional[int]:
     return None
 
 
+def _tcggo_cardmarket_low_usd(row: Dict[str, Any]) -> Optional[float]:
+    prices = row.get("prices")
+    if not isinstance(prices, dict):
+        return None
+    cm = prices.get("cardmarket")
+    if not isinstance(cm, dict):
+        return None
+    v = _f(cm.get("lowest"))
+    if v is None:
+        return None
+    # TCGGO sometimes emits cent-like integers (e.g. 39500 for 395.00).
+    if v >= 1000 and abs(v - int(v)) < 1e-9:
+        v = v / 100.0
+    return round(float(v), 4) if v > 0 else None
+
+
+def _tcggo_is_excluded_product_name(name: str) -> bool:
+    low = (name or "").lower()
+    return any(
+        k in low
+        for k in (
+            " case",
+            "pokemon center",
+            "checklane",
+            "blister",
+            "bundle",
+            "fun pack",
+            "collection",
+            "tin",
+            "build & battle",
+        )
+    )
+
+
+def _tcggo_primary_pack_cost_from_episode(
+    set_row: Dict[str, Any], rows: List[Dict[str, Any]]
+) -> Tuple[Optional[float], Dict[str, Any]]:
+    ppb = _packs_per_box(set_row)
+    cands: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        name = str(r.get("name") or "")
+        if not name:
+            continue
+        low = name.lower()
+        if _tcggo_is_excluded_product_name(name):
+            continue
+        price = _tcggo_cardmarket_low_usd(r)
+        if price is None:
+            continue
+        kind: Optional[str] = None
+        implied = price
+        if "sleeved booster" in low:
+            kind = "sleeved_booster"
+        elif "booster box" in low:
+            kind = "booster_box"
+            packs = _infer_packs_in_sealed(name) or ppb
+            if packs <= 0:
+                packs = ppb
+            implied = round(float(price) / float(packs), 4)
+        elif "elite trainer box" in low:
+            kind = "elite_trainer_box"
+            packs = _infer_packs_in_sealed(name) or 9
+            if packs <= 0:
+                packs = 9
+            implied = round(float(price) / float(packs), 4)
+        elif "booster" in low:
+            kind = "single_booster_pack"
+        if not kind:
+            continue
+        prev = cands.get(kind)
+        if prev is None or float(implied) < float(prev.get("implied_pack_usd") or 1e18):
+            cands[kind] = {
+                "name": name,
+                "tcggo_product_id": r.get("id"),
+                "cardmarket_low_usd": round(float(price), 4),
+                "implied_pack_usd": round(float(implied), 4),
+            }
+
+    priority = ("single_booster_pack", "sleeved_booster", "elite_trainer_box", "booster_box")
+    for k in priority:
+        row = cands.get(k)
+        if row and row.get("implied_pack_usd") is not None:
+            br = {"path": "episode_products.primary_only", "candidates": cands, "selected_kind": k, "selected": row}
+            return float(row["implied_pack_usd"]), br
+    return None, {"path": "episode_products.no_primary_match", "candidates": cands}
+
+
 def _http_json(url: str, *, timeout: int = 90) -> Any:
     req = urllib.request.Request(url, headers=HEAD)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -323,15 +412,20 @@ def _tcgcsv_match_group_id(set_row: Dict[str, Any], groups: List[Dict[str, Any]]
         score = 0
         if want_abbr and abbr == want_abbr:
             score += 120
-        if want_name and nm == want_name:
-            score += 100
-        elif want_name and want_name in nm:
-            score += 70
-        elif want_name and nm in want_name:
-            score += 50
+        if want_name and nm:
+            if nm == want_name:
+                score += 200
+            elif want_name in nm:
+                # Require a reasonably strong containment signal (prefix/word-ish boundary),
+                # otherwise short set names can over-match unrelated groups.
+                if nm.startswith(want_name) or f" {want_name} " in f" {nm} ":
+                    score += 90
+            elif len(nm) >= 6 and nm in want_name:
+                # Only allow reverse containment for non-trivial group names.
+                score += 40
         if score > best[0]:
             best = (score, gid_i, str(g.get("name") or ""))
-    return best[1] if best[0] >= 50 else None
+    return best[1] if best[0] >= 90 else None
 
 
 def _tcgcsv_products_prices(group_id: int) -> Tuple[List[Dict[str, Any]], Dict[int, float]]:
@@ -542,28 +636,48 @@ def run_one_set(
     )
 
     api_key = str(tcggo_state.get("api_key") or "").strip()
-    sp = breakdown.get("single_booster_pack") if isinstance(breakdown.get("single_booster_pack"), dict) else {}
-    tid = sp.get("product_id")
     tcggo_usd: Optional[float] = None
     tcggo_br: Dict[str, Any] = {}
-    if api_key and tid:
-        try:
-            tcggo_usd, tcggo_br = _fetch_tcggo_pack_market_usd(
-                api_key,
-                pack_tcgplayer_pid=int(tid),
-                set_row=set_row,
-                episodes_by_name=tcggo_state.get("episodes_by_name") or {},
-                episode_products_cache=tcggo_state.setdefault("episode_products", {}),
-                sleep_s=sleep_s,
-                history_days=int(tcggo_state.get("history_days") or 180),
-            )
-            if tcggo_usd is not None:
-                rep["tcggo_ok"] = rep.get("tcggo_ok", 0) + 1
-            else:
-                rep["tcggo_miss"] = rep.get("tcggo_miss", 0) + 1
-        except Exception as ex:
-            tcggo_br = {"error": str(ex)[:240]}
-            rep["tcggo_errors"] = rep.get("tcggo_errors", 0) + 1
+    if api_key:
+        ep_id = _resolve_tcggo_episode_id(set_row, tcggo_state.get("episodes_by_name") or {})
+        if ep_id is not None:
+            ecache = tcggo_state.setdefault("episode_products", {})
+            if ep_id not in ecache:
+                ecache[ep_id] = fetch_episode_products_all(int(ep_id), api_key, sleep_s=max(0.0, sleep_s))
+                time.sleep(max(0.0, sleep_s))
+            tcggo_usd, tcggo_br = _tcggo_primary_pack_cost_from_episode(set_row, ecache.get(ep_id) or [])
+            tcggo_br["episode_id"] = int(ep_id)
+        else:
+            tcggo_br = {"path": "episode_unresolved"}
+
+        # Fallback to legacy history-by-product-id path only when primary-only scan fails.
+        if tcggo_usd is None:
+            sp = breakdown.get("single_booster_pack") if isinstance(breakdown.get("single_booster_pack"), dict) else {}
+            tid = sp.get("product_id")
+            if tid:
+                try:
+                    tcggo_usd, tcggo_br_legacy = _fetch_tcggo_pack_market_usd(
+                        api_key,
+                        pack_tcgplayer_pid=int(tid),
+                        set_row=set_row,
+                        episodes_by_name=tcggo_state.get("episodes_by_name") or {},
+                        episode_products_cache=tcggo_state.setdefault("episode_products", {}),
+                        sleep_s=sleep_s,
+                        history_days=int(tcggo_state.get("history_days") or 180),
+                    )
+                    tcggo_br = {"path": "legacy_history_fallback", "primary_only": tcggo_br, "legacy": tcggo_br_legacy}
+                except Exception as ex:
+                    tcggo_br = {
+                        "path": "legacy_history_fallback.error",
+                        "primary_only": tcggo_br,
+                        "error": str(ex)[:240],
+                    }
+                    rep["tcggo_errors"] = rep.get("tcggo_errors", 0) + 1
+
+        if tcggo_usd is not None:
+            rep["tcggo_ok"] = rep.get("tcggo_ok", 0) + 1
+        else:
+            rep["tcggo_miss"] = rep.get("tcggo_miss", 0) + 1
     breakdown["tcggo"] = tcggo_br
 
     if prefer == "tcggo":
