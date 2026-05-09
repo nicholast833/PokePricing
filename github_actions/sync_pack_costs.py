@@ -235,6 +235,8 @@ def first_tcg_market_usd(price_entry: Any) -> Optional[float]:
 
 
 def _load_local_cache_bundle(cache_dir: Path, set_name: str) -> Optional[Tuple[int, List[Dict[str, Any]], Dict[str, Any]]]:
+    if not cache_dir.is_dir():
+        return None
     pj = find_tcg_cache_products_path(cache_dir, set_name)
     if not pj or not pj.is_file():
         return None

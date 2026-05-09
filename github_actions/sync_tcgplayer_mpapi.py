@@ -50,7 +50,9 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(SCRIPT_DIR))
+sys.path.insert(0, str(ROOT / "scrape"))
 
+from dataset_report_paths import dataset_sidecar_report_path  # noqa: E402
 from json_atomic_util import write_json_atomic  # noqa: E402
 
 from tcgtracking_merge import (  # noqa: E402
@@ -170,6 +172,8 @@ def find_tcg_cache_products_path(cache_dir: Path, set_name: str) -> Optional[Pat
     """Pick tcg_cache/{{set_id}}/products.json whose set_name matches *set_name* (norm_set_key)."""
     want = norm_set_key(set_name)
     if not want:
+        return None
+    if not cache_dir.is_dir():
         return None
     best: Optional[Tuple[int, Path]] = None
     for sub in cache_dir.iterdir():
@@ -372,7 +376,8 @@ def main() -> int:
         run_set(set_row, cache_dir=args.cache.resolve(), sleep_s=max(0.0, float(args.sleep)), rep=rep)
 
     write_json_atomic(out, data)
-    rep_path = out.parent / (out.name + ".tcgplayer_mpapi_sync_report.json")
+    rep_path = dataset_sidecar_report_path(out, ".tcgplayer_mpapi_sync_report.json")
+    rep_path.parent.mkdir(parents=True, exist_ok=True)
     rep_path.write_text(json.dumps(rep, indent=2), encoding="utf-8")
     print(json.dumps(rep, indent=2), flush=True)
     print("Wrote report ->", rep_path, flush=True)
