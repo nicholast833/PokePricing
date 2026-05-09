@@ -749,7 +749,7 @@ const SHARED_UTILS = {
             if (hasVol) {
                 datasets.push({
                     type: 'bar',
-                    label: 'eBay sold / day (count)',
+                    label: 'eBay sold listings / day',
                     data: volCt,
                     yAxisID: 'y1',
                     order: -1,
@@ -803,7 +803,7 @@ const SHARED_UTILS = {
         }
         const hasY1Out = outDatasets.some((ds) => ds && ds.yAxisID === 'y1');
         if (hasY1Out) {
-            parts.push('Green bars (right axis): eBay sold listings per day; soft pink / peach lines: median sold USD (ungraded / graded).');
+            parts.push('Right axis — green bars: count of sold listings grouped by sale date (one bar per day). Lines: median sold USD (ungraded vs graded) on the same dates as price sources.');
         }
         const titleNote = parts.join(' ');
 
@@ -1704,6 +1704,36 @@ const SHARED_UTILS = {
         }
     },
 
+    /** Thumbnail for an eBay Browse snippet (when sync stored `image_url`), else card art. */
+    ebayListingThumbUrl(row, card) {
+        const r = row && typeof row === 'object' ? row : {};
+        const u = r.image_url || r.imageUrl || r.thumbnail || (r.image && (r.image.imageUrl || r.image.image_url));
+        if (u && String(u).trim()) return String(u).trim();
+        return card && card.image_url ? String(card.image_url).trim() : '';
+    },
+
+    /**
+     * Compact badge: active listing price vs Explorer blended chart median (±% over / under).
+     */
+    ebayListingVsMarketHtml(listingPrice, refUsd) {
+        const esc = SHARED_UTILS.escHtml;
+        const lp = Number(listingPrice);
+        const ref = Number(refUsd);
+        if (!Number.isFinite(lp) || lp <= 0 || !Number.isFinite(ref) || ref <= 0) return '';
+        const pct = ((lp - ref) / ref) * 100;
+        const absPct = Math.abs(pct);
+        if (absPct < 1.5) {
+            return `<span class="ptcg-ebay-vs ptcg-ebay-vs--at" title="Within ~1.5% of blended chart median">≈ median</span>`;
+        }
+        const over = pct > 0;
+        const cls = over ? 'ptcg-ebay-vs--above' : 'ptcg-ebay-vs--below';
+        const sym = over ? '+' : '−';
+        const tip = over
+            ? `${absPct.toFixed(1)}% above blended chart median (Buy It Now snapshot)`
+            : `${absPct.toFixed(1)}% below blended chart median (Buy It Now snapshot)`;
+        return `<span class="ptcg-ebay-vs ${cls}" title="${SHARED_UTILS.escAttr(tip)}">${esc(sym + absPct.toFixed(0) + '%')}</span>`;
+    },
+
     /** eBay web search URL for the same Browse query (all hits), from sync or rebuilt from `ebay_browse_query`. */
     ebaySchSearchUrlFromCard(card) {
         if (!card) return '';
@@ -2408,7 +2438,7 @@ const SHARED_UTILS = {
                 <details class="card-detail-unified-help">
                     <summary class="card-detail-unified-help__summary">Line &amp; series descriptions</summary>
                     <div class="card-detail-unified-help__body">
-                        <p class="card-detail-unified-help__p">Orange: TCGGO TCGPlayer (USD). Pink dashed: Cardmarket EU low at <strong>×${fx}</strong> EUR→USD. Purple: Pokémon Wizard. Soft pink / peach lines: eBay sold median (ungraded / graded). Green bars (right axis): sold count per day.</p>
+                        <p class="card-detail-unified-help__p">Orange: TCGGO TCGPlayer (USD). Pink dashed: Cardmarket EU low at <strong>×${fx}</strong> EUR→USD. Purple: Pokémon Wizard. Soft pink / peach lines: median <strong>sold</strong> USD (ungraded vs graded). Green bars (right axis): <strong>sold listing count per day</strong> — same calendar axis as the price lines so you can read velocity next to level.</p>
                         ${noteTech}
                     </div>
                 </details>`;
@@ -2833,58 +2863,82 @@ const SHARED_UTILS = {
                 ? `<div class="card-detail-ebay-kpi-row" role="group" aria-label="eBay price range, raw and graded last sold">${kpiSegs.join('<span class="card-detail-ebay-kpi-dot" aria-hidden="true">·</span>')}</div>`
                 : '';
 
-            // Sample listings as premium cards
-            const rows = Array.isArray(card.ebay_browse_item_summaries) ? card.ebay_browse_item_summaries : [];
-            const listingCards = [];
-            rows.forEach((row, i) => {
+            const chartRefForListings = blendUsd != null && Number.isFinite(blendUsd) && blendUsd > 0
+                ? blendUsd
+                : (Number.isFinite(listUsd) && listUsd > 0 ? listUsd : null);
+
+            const thumbCell = (thumbUrl) => {
+                if (thumbUrl && String(thumbUrl).trim()) {
+                    return `<div class="ptcg-ebay-list__thumb-wrap"><img class="ptcg-ebay-list__thumb" src="${escA(String(thumbUrl).trim())}" alt="" width="52" height="52" loading="lazy" decoding="async" /></div>`;
+                }
+                const ch = (nm && String(nm).trim().charAt(0)) || '?';
+                return `<div class="ptcg-ebay-list__thumb-wrap"><div class="ptcg-ebay-list__thumb-ph" aria-hidden="true">${esc(ch.toUpperCase())}</div></div>`;
+            };
+
+            const pushActiveListingRow = (row, i) => {
                 if (!row || typeof row !== 'object') return;
                 const title = row.title != null ? String(row.title) : `Listing ${i + 1}`;
                 const url = row.url ? String(row.url) : '';
                 const pv = Number(row.price_value);
-                const priceTxt = (Number.isFinite(pv) && pv > 0)
-                    ? fmt(pv)
-                    : '—';
-                const titleHtml = url
-                    ? `<a class="card-detail-link" style="color:#e2e8f0;text-decoration:none;" href="${escA(url)}" target="_blank" rel="noopener noreferrer">${esc(title)}</a>`
-                    : `<span style="color:#e2e8f0;">${esc(title)}</span>`;
-                listingCards.push(`
-                    <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.07);border-radius:6px;padding:0.45rem 0.65rem;display:flex;justify-content:space-between;align-items:flex-start;gap:0.5rem;">
-                        <div style="font-size:0.78rem;line-height:1.35;flex:1;min-width:0;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;">${titleHtml}</div>
-                        <div style="font-size:0.88rem;font-weight:600;color:#34d399;white-space:nowrap;flex-shrink:0;">${esc(priceTxt)}</div>
-                    </div>`);
-            });
-            // Fallback to first item if no summaries
-            if (!listingCards.length && (card.ebay_browse_first_item_url || card.ebay_browse_first_item_title)) {
-                const url = card.ebay_browse_first_item_url ? String(card.ebay_browse_first_item_url) : '';
-                const title = card.ebay_browse_first_item_title ? String(card.ebay_browse_first_item_title) : 'Top search hit';
-                const pv = Number(card.ebay_browse_first_item_price_value);
                 const priceTxt = (Number.isFinite(pv) && pv > 0) ? fmt(pv) : '—';
                 const titleHtml = url
-                    ? `<a class="card-detail-link" style="color:#e2e8f0;text-decoration:none;" href="${escA(url)}" target="_blank" rel="noopener noreferrer">${esc(title)}</a>`
-                    : `<span style="color:#e2e8f0;">${esc(title)}</span>`;
+                    ? `<a class="ptcg-ebay-list__title-link" href="${escA(url)}" target="_blank" rel="noopener noreferrer">${esc(title)}</a>`
+                    : `<span class="ptcg-ebay-list__title-text">${esc(title)}</span>`;
+                const vs = chartRefForListings && Number.isFinite(pv) && pv > 0
+                    ? SHARED_UTILS.ebayListingVsMarketHtml(pv, chartRefForListings)
+                    : '<span class="ptcg-ebay-vs ptcg-ebay-vs--na">—</span>';
+                const tu = SHARED_UTILS.ebayListingThumbUrl(row, card);
                 listingCards.push(`
-                    <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.07);border-radius:6px;padding:0.45rem 0.65rem;display:flex;justify-content:space-between;align-items:flex-start;gap:0.5rem;">
-                        <div style="font-size:0.78rem;line-height:1.35;flex:1;min-width:0;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;">${titleHtml}</div>
-                        <div style="font-size:0.88rem;font-weight:600;color:#34d399;white-space:nowrap;flex-shrink:0;">${esc(priceTxt)}</div>
+                    <div class="ptcg-ebay-list__row ptcg-ebay-list__row--active" role="listitem">
+                        ${thumbCell(tu)}
+                        <div class="ptcg-ebay-list__main">
+                            <div class="ptcg-ebay-list__title">${titleHtml}</div>
+                            <div class="ptcg-ebay-list__meta">Buy It Now · Browse snapshot</div>
+                        </div>
+                        <div class="ptcg-ebay-list__vs-cell">${vs}</div>
+                        <div class="ptcg-ebay-list__price-cell"><span class="ptcg-ebay-list__price ptcg-ebay-list__price--ask">${esc(priceTxt)}</span></div>
                     </div>`);
+            };
+
+            const rows = Array.isArray(card.ebay_browse_item_summaries) ? card.ebay_browse_item_summaries : [];
+            const listingCards = [];
+            rows.forEach((row, i) => pushActiveListingRow(row, i));
+            if (!listingCards.length && (card.ebay_browse_first_item_url || card.ebay_browse_first_item_title)) {
+                pushActiveListingRow({
+                    title: card.ebay_browse_first_item_title ? String(card.ebay_browse_first_item_title) : 'Top search hit',
+                    url: card.ebay_browse_first_item_url ? String(card.ebay_browse_first_item_url) : '',
+                    price_value: card.ebay_browse_first_item_price_value,
+                }, 0);
             }
 
-            // Mix in up to 2 recent sold listings
             const recentSold = allEbaySold.slice().sort((a, b) => {
                 const db = SHARED_UTILS.normalizeEbaySoldDateKey(b.date) || String(b.date || '');
                 const da = SHARED_UTILS.normalizeEbaySoldDateKey(a.date) || String(a.date || '');
                 return db.localeCompare(da);
             }).slice(0, 2);
 
-            recentSold.forEach(sale => {
+            recentSold.forEach((sale) => {
                 const priceTxt = fmt(sale.price);
-                const shortTitle = sale.title.length > 70 ? sale.title.slice(0, 68) + '\u2026' : sale.title;
+                const shortTitle = String(sale.title || '').length > 72
+                    ? String(sale.title).slice(0, 70) + '\u2026'
+                    : String(sale.title || 'Sold listing');
+                const soldUrl = sale.url ? String(sale.url) : '';
+                const titleHtml = soldUrl
+                    ? `<a class="ptcg-ebay-list__title-link ptcg-ebay-list__title-link--sold" href="${escA(soldUrl)}" target="_blank" rel="noopener noreferrer">${esc(shortTitle)}</a>`
+                    : `<span class="ptcg-ebay-list__title-text ptcg-ebay-list__title-text--sold">${esc(shortTitle)}</span>`;
+                const vs = chartRefForListings && Number.isFinite(Number(sale.price)) && Number(sale.price) > 0
+                    ? SHARED_UTILS.ebayListingVsMarketHtml(Number(sale.price), chartRefForListings)
+                    : '<span class="ptcg-ebay-vs ptcg-ebay-vs--na">—</span>';
+                const stu = card.image_url ? String(card.image_url).trim() : '';
                 listingCards.push(`
-                    <div style="background:rgba(16,185,129,0.06);border:1px solid rgba(16,185,129,0.2);border-radius:6px;padding:0.45rem 0.65rem;display:flex;justify-content:space-between;align-items:flex-start;gap:0.5rem;">
-                        <div style="font-size:0.78rem;line-height:1.35;flex:1;min-width:0;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;color:#d1fae5;">
-                            <span style="font-size:0.6rem;background:rgba(16,185,129,0.2);color:#6ee7b7;border-radius:3px;padding:0.1rem 0.3rem;margin-right:0.35rem;vertical-align:middle;">SOLD ${esc(sale.date)}</span>${esc(shortTitle)}
+                    <div class="ptcg-ebay-list__row ptcg-ebay-list__row--sold" role="listitem">
+                        ${thumbCell(stu)}
+                        <div class="ptcg-ebay-list__main">
+                            <div class="ptcg-ebay-list__badge-row"><span class="ptcg-ebay-list__pill ptcg-ebay-list__pill--sold">Sold</span><span class="ptcg-ebay-list__date">${esc(String(sale.date || '—'))}</span></div>
+                            <div class="ptcg-ebay-list__title">${titleHtml}</div>
                         </div>
-                        <div style="font-size:0.88rem;font-weight:600;color:#6ee7b7;white-space:nowrap;flex-shrink:0;">${esc(priceTxt)}</div>
+                        <div class="ptcg-ebay-list__vs-cell">${vs}</div>
+                        <div class="ptcg-ebay-list__price-cell"><span class="ptcg-ebay-list__price ptcg-ebay-list__price--sold">${esc(priceTxt)}</span></div>
                     </div>`);
             });
 
@@ -2895,17 +2949,27 @@ const SHARED_UTILS = {
                     : '');
 
             ebayBrowseBlock = `
-            <div class="card-detail-section">
-                <h4 style="display:flex;align-items:center;justify-content:space-between;gap:1rem;">
-                    <span>eBay Active Listings</span>
+            <div class="card-detail-section card-detail-section--ebay-live">
+                <h4 class="card-detail-section__ebay-head">
+                    <span class="card-detail-section__ebay-title">Live eBay listings</span>
                     ${viewAllLink}
                 </h4>
+                <p class="card-detail-section__ebay-lead">Thumbnails when the Browse sync stored them; prices vs your <strong>blended chart median</strong> (same basis as the scorecard).</p>
                 ${kpiRow ? `<div class="card-detail-ebay-kpi-wrap">${kpiRow}</div>` : ''}
                 ${listingCards.length ? `
-                <div class="card-detail-ebay-listings-scroll" style="max-height:261px;overflow-y:auto;display:flex;flex-direction:column;gap:0.4rem;padding-right:3px;margin-top:0.35rem;">
+                <div class="card-detail-ebay-listings-scroll ptcg-ebay-listings-scroll" role="list" aria-label="eBay listings and recent sold samples">
+                        <div class="ptcg-ebay-list__gridhead" aria-hidden="true">
+                            <span class="ptcg-ebay-list__gridhead-spacer"></span>
+                            <span>Listing</span>
+                            <span>vs chart</span>
+                            <span class="ptcg-ebay-list__gridhead-price">Price</span>
+                        </div>
                         ${listingCards.join('')}
                     </div>` : ''}
-                <p style="margin:0.65rem 0 0;font-size:0.72rem;color:#475569;">Active listing snapshot · sold medians &amp; daily counts are in the unified <strong>Price history</strong> chart when sold data exists · query: <code style="font-size:0.85em;color:#64748b;">${esc(card.ebay_browse_query ? String(card.ebay_browse_query) : '—')}</code></p>
+                <details class="card-detail-ebay-footnote">
+                    <summary>How this block relates to the price chart</summary>
+                    <p>Rows here are <strong>active</strong> Buy It Now snapshots from eBay search (not sold comps). Median <strong>sold</strong> paths and <strong>per-day sold counts</strong> share the unified <strong>Price history</strong> chart (green bars on the right axis when that data exists). Search: <code class="card-detail-ebay-footnote__code">${esc(card.ebay_browse_query ? String(card.ebay_browse_query) : '—')}</code></p>
+                </details>
             </div>`;
         }
 
@@ -3175,7 +3239,7 @@ const SHARED_UTILS = {
                     position: 'right',
                     beginAtZero: true,
                     grid: { drawOnChartArea: false },
-                    title: { display: true, text: 'Sold / day', color: tickColor },
+                    title: { display: true, text: 'Sold listings / day', color: tickColor },
                     ticks: { color: tickColor, precision: 0 },
                 };
             }

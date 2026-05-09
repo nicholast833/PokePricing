@@ -93,7 +93,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     position: 'right',
                     beginAtZero: true,
                     grid: { drawOnChartArea: false },
-                    title: { display: true, text: 'Sold / day', color: tickColor },
+                    title: { display: true, text: 'Sold listings / day', color: tickColor },
                     ticks: { color: tickColor, precision: 0 },
                 };
             }

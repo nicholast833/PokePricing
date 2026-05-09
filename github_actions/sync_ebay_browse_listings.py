@@ -203,6 +203,18 @@ def _snippet_from_hit(hit: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     cur = price.get("currency")
     if cur:
         out["price_currency"] = str(cur)
+    img = hit.get("image")
+    if isinstance(img, dict):
+        iu = img.get("imageUrl") or img.get("image_url")
+        if iu:
+            out["image_url"] = str(iu)[:800]
+    thumbs = hit.get("thumbnailImages")
+    if not out.get("image_url") and isinstance(thumbs, list) and thumbs:
+        t0 = thumbs[0] if isinstance(thumbs[0], dict) else None
+        if isinstance(t0, dict):
+            iu = t0.get("imageUrl") or t0.get("image_url")
+            if iu:
+                out["image_url"] = str(iu)[:800]
     if not out.get("title") and not out.get("url"):
         return None
     return out
