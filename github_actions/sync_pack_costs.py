@@ -541,7 +541,7 @@ def run_one_set(
         set_row, products, prices, prefer=track_prefer, tcgcsv_markets=tcgcsv_markets
     )
 
-    api_key = str(tcgo_state.get("api_key") or "").strip()
+    api_key = str(tcggo_state.get("api_key") or "").strip()
     sp = breakdown.get("single_booster_pack") if isinstance(breakdown.get("single_booster_pack"), dict) else {}
     tid = sp.get("product_id")
     tcggo_usd: Optional[float] = None
@@ -552,10 +552,10 @@ def run_one_set(
                 api_key,
                 pack_tcgplayer_pid=int(tid),
                 set_row=set_row,
-                episodes_by_name=tcgo_state.get("episodes_by_name") or {},
+                episodes_by_name=tcggo_state.get("episodes_by_name") or {},
                 episode_products_cache=tcggo_state.setdefault("episode_products", {}),
                 sleep_s=sleep_s,
-                history_days=int(tcgo_state.get("history_days") or 180),
+                history_days=int(tcggo_state.get("history_days") or 180),
             )
             if tcggo_usd is not None:
                 rep["tcggo_ok"] = rep.get("tcggo_ok", 0) + 1
