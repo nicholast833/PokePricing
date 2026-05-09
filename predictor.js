@@ -26,21 +26,46 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             const sets = await fetchPokemonSetsFromSupabase();
             if (pg) pg.setDeterminate(0.32);
+            let fromDb = null;
+            if (typeof fetchPredictorAnalyticsAssetsFromSupabase === 'function') {
+                try {
+                    fromDb = await fetchPredictorAnalyticsAssetsFromSupabase();
+                } catch (e) {
+                    console.warn('predictor_analytics_assets:', e);
+                }
+            }
+            const fileArr = (path) =>
+                fetch(SHARED_UTILS.resolveDataAssetUrl(path))
+                    .then((r) => r.json())
+                    .catch(() => []);
+            const fileObj = (path) =>
+                fetch(SHARED_UTILS.resolveDataAssetUrl(path))
+                    .then((r) => r.json())
+                    .catch(() => ({}));
+            const pickArr = (key, path) =>
+                fromDb != null && Object.prototype.hasOwnProperty.call(fromDb, key)
+                    ? Promise.resolve(fromDb[key])
+                    : fileArr(path);
+            const pickMacro = () =>
+                fromDb != null && Object.prototype.hasOwnProperty.call(fromDb, 'tcg_macro_interest_by_year')
+                    ? Promise.resolve(fromDb.tcg_macro_interest_by_year)
+                    : fileObj('tcg_macro_interest_by_year.json');
             const [characters, trends, artists, tcgMacro] = await Promise.all([
-                fetch(SHARED_UTILS.resolveDataAssetUrl('character_premium_scores.json')).then(r => r.json()).catch(() => []),
-                fetch(SHARED_UTILS.resolveDataAssetUrl('google_trends_momentum.json')).then(r => r.json()).catch(() => []),
-                fetch(SHARED_UTILS.resolveDataAssetUrl('artist_scores.json')).then(r => r.json()).catch(() => []),
-                fetch(SHARED_UTILS.resolveDataAssetUrl('tcg_macro_interest_by_year.json')).then(r => r.json()).catch(() => ({}))
+                pickArr('character_premium_scores', 'character_premium_scores.json'),
+                pickArr('google_trends_momentum', 'google_trends_momentum.json'),
+                pickArr('artist_scores', 'artist_scores.json'),
+                pickMacro(),
             ]);
             if (pg) pg.setDeterminate(0.58);
 
             allSetsData = sets;
-            analyticsState.characterData = characters;
-            analyticsState.trendsData = trends;
-            analyticsState.tcgMacroInterest = tcgMacro;
-            
+            analyticsState.characterData = Array.isArray(characters) ? characters : [];
+            analyticsState.trendsData = Array.isArray(trends) ? trends : [];
+            analyticsState.tcgMacroInterest =
+                tcgMacro && typeof tcgMacro === 'object' && !Array.isArray(tcgMacro) ? tcgMacro : {};
+            const artistList = Array.isArray(artists) ? artists : [];
             // Build artist lookup
-            artists.forEach(a => {
+            artistList.forEach((a) => {
                 if (a.artist && a.chase_median) analyticsState.artistChaseLookup[a.artist] = a.chase_median;
             });
 
@@ -254,7 +279,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (detailsSplit) detailsSplit.classList.add('prediction-details--full-card-data');
 
         requestAnimationFrame(() => {
-            SHARED_UTILS.initCardDetailCharts(card, predictorCharts);
+            SHARED_UTILS.initCardDetailCharts(card, predictorCharts, { chartIdMode: 'dynamic' });
         });
 
         syncPredictorCardUrl(card, set);
@@ -358,7 +383,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!pv || pv.style.display === 'none' || !window._currentPredictorCard) return;
         destroyPredictorCharts();
         requestAnimationFrame(() => {
-            SHARED_UTILS.initCardDetailCharts(window._currentPredictorCard, predictorCharts);
+            SHARED_UTILS.initCardDetailCharts(window._currentPredictorCard, predictorCharts, { chartIdMode: 'dynamic' });
         });
     });
 
@@ -374,7 +399,10 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!pv || pv.style.display === 'none' || !window._currentPredictorCard) return;
         destroyPredictorCharts();
         requestAnimationFrame(() => {
-            SHARED_UTILS.initCardDetailCharts(window._currentPredictorCard, predictorCharts, { historyWindowMonths: m });
+            SHARED_UTILS.initCardDetailCharts(window._currentPredictorCard, predictorCharts, {
+                chartIdMode: 'dynamic',
+                historyWindowMonths: m,
+            });
         });
     });
 

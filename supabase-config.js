@@ -167,3 +167,20 @@ async function fetchCardPriceHistory(uniqueCardId) {
     const row = await fetchCardLiveRowFromSupabase(uniqueCardId);
     return row && row.price_history ? row.price_history : null;
 }
+
+/**
+ * Predictor / Analytics sidecar JSON from ``predictor_analytics_assets`` (same shapes as ``data/assets/*.json``).
+ * @returns {Promise<Record<string, unknown>|null>} map asset_key → payload, or null if table missing / error / empty.
+ */
+async function fetchPredictorAnalyticsAssetsFromSupabase() {
+    const url = `${SUPABASE_URL}/rest/v1/predictor_analytics_assets?select=asset_key,payload`;
+    const r = await fetch(url, { headers: _supabaseRestHeaders() });
+    if (!r.ok) return null;
+    const rows = await r.json();
+    if (!Array.isArray(rows) || rows.length === 0) return null;
+    const out = {};
+    rows.forEach((row) => {
+        if (row && row.asset_key != null) out[String(row.asset_key)] = row.payload;
+    });
+    return Object.keys(out).length ? out : null;
+}

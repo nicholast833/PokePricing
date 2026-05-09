@@ -5647,13 +5647,29 @@ document.addEventListener('DOMContentLoaded', () => {
 
             const sets = await fetchPokemonSetsFromSupabase();
             if (pg) pg.setDeterminate(0.28);
+            let fromDb = null;
+            if (typeof fetchPredictorAnalyticsAssetsFromSupabase === 'function') {
+                try {
+                    fromDb = await fetchPredictorAnalyticsAssetsFromSupabase();
+                } catch (e) {
+                    console.warn('predictor_analytics_assets:', e);
+                }
+            }
+            const pickArr = (key, path) =>
+                fromDb != null && Object.prototype.hasOwnProperty.call(fromDb, key)
+                    ? Promise.resolve(fromDb[key])
+                    : fetchJsonOptional(path);
+            const pickMacroDoc = () =>
+                fromDb != null && Object.prototype.hasOwnProperty.call(fromDb, 'tcg_macro_interest_by_year')
+                    ? Promise.resolve(fromDb.tcg_macro_interest_by_year)
+                    : fetchJsonOptionalDocument('tcg_macro_interest_by_year.json', fetchOpts);
             const [characters, trends, artists, nostalgia, speciesPopularityDoc, tcgMacroDoc] = await Promise.all([
-                fetchJsonOptional('character_premium_scores.json'),
-                fetchJsonOptional('google_trends_momentum.json'),
-                fetchJsonOptional('artist_scores.json'),
+                pickArr('character_premium_scores', 'character_premium_scores.json'),
+                pickArr('google_trends_momentum', 'google_trends_momentum.json'),
+                pickArr('artist_scores', 'artist_scores.json'),
                 fetchJsonOptional('nostalgia_index.json'),
                 fetchJsonOptionalDocument('species_popularity_list.json', fetchOpts),
-                fetchJsonOptionalDocument('tcg_macro_interest_by_year.json', fetchOpts)
+                pickMacroDoc(),
             ]);
             allSetsData = sets.reverse();
             updateAnalyticsGemrateStrip();

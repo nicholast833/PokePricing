@@ -1,0 +1,28 @@
+name: Sync predictor analytics assets
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Weekly — adjust or add paths filter if these files rarely change
+    - cron: "0 6 * * 1"
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: pip install -r github_actions/requirements.txt
+
+      - name: Upload sidecar JSON to Supabase
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python github_actions/sync_predictor_analytics_assets.py

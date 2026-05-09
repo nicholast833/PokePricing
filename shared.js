@@ -2064,6 +2064,7 @@ const SHARED_UTILS = {
                 pcPrice: 'explorerChartPcPrice',
                 ebayBrowse: 'explorerChartEbayBrowse',
                 ebaySoldDaily: 'explorerChartEbaySoldDaily',
+                tcggoEbaySold: 'explorerChartTcggoEbaySold',
             };
         }
         const idPrefix = card && card.id ? String(card.id).replace(/\W/g, '_') : 'shared';
@@ -2078,7 +2079,97 @@ const SHARED_UTILS = {
             pcPrice: `${idPrefix}_pcPrice`,
             ebayBrowse: `${idPrefix}_ebayBrowse`,
             ebaySoldDaily: `${idPrefix}_ebaySoldDaily`,
+            tcggoEbaySold: `${idPrefix}_tcggoEbaySold`,
         };
+    },
+
+    /**
+     * Normalizes ``card.tcggo_ebay_sold_prices`` (TCGGO /ebay-sold-prices ``data`` rows) for charting.
+     */
+    normalizeTcggoEbaySoldGradeRows(card) {
+        const raw = card && card.tcggo_ebay_sold_prices;
+        const rows = Array.isArray(raw) ? raw : [];
+        const out = [];
+        const esc = (s) => String(s || '').trim();
+        rows.forEach((row) => {
+            if (!row || typeof row !== 'object') return;
+            let median = null;
+            Object.keys(row).forEach((k) => {
+                const lk = k.toLowerCase();
+                if (!lk.includes('median') && lk !== 'mean' && lk !== 'average' && lk !== 'avg') return;
+                const v = Number(row[k]);
+                if (Number.isFinite(v) && v > 0 && median == null) median = v;
+            });
+            if (median == null) {
+                ['price', 'sold_price', 'ebay_price', 'amount'].forEach((k) => {
+                    const v = Number(row[k]);
+                    if (median == null && Number.isFinite(v) && v > 0) median = v;
+                });
+            }
+            if (median == null) return;
+            const grader = esc(
+                row.grader || row.grading_company || row.company || row.psa || row.label || row.name || 'Grade',
+            );
+            const grade = esc(row.grade || row.grade_label || row.condition || '');
+            const label = grade ? `${grader} ${grade}` : grader;
+            out.push({ label: label.slice(0, 48), median });
+        });
+        out.sort((a, b) => b.median - a.median);
+        return out;
+    },
+
+    /** Horizontal bar chart of median sold USD by grader/grade (Chart.js). */
+    mountTcggoEbaySoldGradesBarChart(canvasEl, card, tickColor, baseScale, containerCharts) {
+        if (!canvasEl || typeof Chart === 'undefined') return;
+        const rows = SHARED_UTILS.normalizeTcggoEbaySoldGradeRows(card);
+        if (!rows.length) return;
+        const prev = typeof Chart !== 'undefined' && typeof Chart.getChart === 'function' ? Chart.getChart(canvasEl) : null;
+        if (prev) {
+            try {
+                prev.destroy();
+            } catch (e) { /* ignore */ }
+        }
+        const labels = rows.map((r) => r.label);
+        const data = rows.map((r) => r.median);
+        const ch = new Chart(canvasEl, {
+            type: 'bar',
+            data: {
+                labels,
+                datasets: [{
+                    label: 'Median sold (USD)',
+                    data,
+                    backgroundColor: labels.map(() => 'rgba(244, 114, 182, 0.55)'),
+                    borderColor: 'rgba(244, 114, 182, 0.95)',
+                    borderWidth: 1,
+                }],
+            },
+            options: {
+                indexAxis: 'y',
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { display: false },
+                    title: { display: false },
+                    tooltip: {
+                        callbacks: {
+                            label(ctx) {
+                                const v = ctx.raw;
+                                return Number.isFinite(Number(v)) ? ` ${SHARED_UTILS.fmtUsd(v)}` : '';
+                            },
+                        },
+                    },
+                },
+                scales: {
+                    x: {
+                        ...baseScale,
+                        ticks: { ...baseScale.ticks, callback: (v) => (Number(v) >= 1000 ? `$${Number(v) / 1000}k` : `$${v}`) },
+                        title: { display: true, text: 'USD', color: tickColor },
+                    },
+                    y: { ...baseScale, ticks: { ...baseScale.ticks, autoSkip: false } },
+                },
+            },
+        });
+        containerCharts.push(ch);
     },
 
     /**
@@ -2543,6 +2634,7 @@ const SHARED_UTILS = {
         SHARED_UTILS.hydrateCardPipelineFields(card);
         const chartIdMode = opts && opts.chartIdMode === 'dynamic' ? 'dynamic' : 'explorer';
         const hidePredictorLink = Boolean(opts && opts.hidePredictorLink);
+        const chartIds = SHARED_UTILS.cardChartCanvasIds(card, chartIdMode);
         const esc = SHARED_UTILS.escHtml;
         const fmt = SHARED_UTILS.fmtUsd;
         const setTitle = set && set.set_name ? String(set.set_name) : 'Set';
@@ -2839,18 +2931,20 @@ const SHARED_UTILS = {
                 ${statsStrip}
             </div>` : '';
 
-        let tcggoEbayApiBlock = '';
-        const tgp = card.tcggo_ebay_sold_prices;
-        if (Array.isArray(tgp) && tgp.length) {
+        const tcggoEbayRows = SHARED_UTILS.normalizeTcggoEbaySoldGradeRows(card);
+        let tcggoEbaySoldBlock = '';
+        if (tcggoEbayRows.length) {
             const syn = card.tcggo_ebay_sold_sync_iso
-                ? `<p class="card-detail-sub" style="margin-bottom:0.5rem;">Synced <code>${esc(String(card.tcggo_ebay_sold_sync_iso))}</code></p>`
+                ? `<p class="card-detail-sub" style="margin-bottom:0.35rem;">Synced <code>${esc(String(card.tcggo_ebay_sold_sync_iso))}</code></p>`
                 : '';
-            const body = esc(JSON.stringify(tgp, null, 2));
-            tcggoEbayApiBlock = `
-            <div class="card-detail-section">
-                <h4>TCGGO eBay sold <span style="font-weight:400;color:#94a3b8;">(API)</span></h4>
+            tcggoEbaySoldBlock = `
+            <div class="card-detail-section card-detail-section--tcggo-ebay-sold">
+                <h4>TCGGO graded eBay medians <span style="font-weight:400;color:#94a3b8;">(API)</span></h4>
                 ${syn}
-                <pre style="margin:0;font-size:0.68rem;line-height:1.35;max-height:200px;overflow:auto;background:rgba(15,23,42,0.6);border:1px solid rgba(148,163,184,0.25);border-radius:6px;padding:0.5rem;color:#cbd5e1;">${body}</pre>
+                <p class="card-detail-sub" style="margin:0 0 0.5rem;">Median sold USD by grader / grade (bars sorted high → low).</p>
+                <div class="card-detail-chart-canvas card-detail-chart-canvas--tcggo-ebay-sold" style="height:min(280px,${12 + tcggoEbayRows.length * 28}px);min-height:120px;">
+                    <canvas id="${SHARED_UTILS.escAttr(String(chartIds.tcggoEbaySold))}"></canvas>
+                </div>
             </div>`;
         }
 
@@ -2891,8 +2985,8 @@ const SHARED_UTILS = {
                 </div>
             </div>
             ${marketLiquidityBlock}
-            ${tcggoEbayApiBlock}
             ${tcggoScoreBlock}
+            ${tcggoEbaySoldBlock}
             ${bodyMainHtml}
             ${foot}
             </div>
@@ -3146,6 +3240,16 @@ const SHARED_UTILS = {
             const block = unifiedCanvas.closest('.card-detail-chart-block');
             if (block) SHARED_UTILS.syncUnifiedHistoryRangeUi(block, histMo);
         }
+
+        const mountChartMode = co.chartIdMode === 'explorer' ? 'explorer' : 'dynamic';
+        const mountChartIds = SHARED_UTILS.cardChartCanvasIds(card, mountChartMode);
+        SHARED_UTILS.mountTcggoEbaySoldGradesBarChart(
+            document.getElementById(mountChartIds.tcggoEbaySold),
+            card,
+            tickColor,
+            baseScale,
+            containerCharts,
+        );
     }
 };
 

@@ -205,6 +205,16 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         SHARED_UTILS.syncUnifiedHistoryRangeUi(modalCardPanel, histMo);
+
+        if (typeof SHARED_UTILS.mountTcggoEbaySoldGradesBarChart === 'function') {
+            SHARED_UTILS.mountTcggoEbaySoldGradesBarChart(
+                document.getElementById('explorerChartTcggoEbaySold'),
+                card,
+                tickColor,
+                baseScale,
+                explorerCardCharts,
+            );
+        }
     }
 
     function hasCollectricsEbay(card) {
