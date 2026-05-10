@@ -701,13 +701,36 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     document.addEventListener('click', (e) => {
-        const row = e.target.closest('.explorer-trending-root .explorer-trend-row');
+        const setRow = e.target.closest('.explorer-trending-root .explorer-trend-row--set');
+        if (setRow) {
+            e.preventDefault();
+            e.stopPropagation();
+            scrollExplorerToSetFromTrending(setRow.getAttribute('data-set-code') || '');
+            return;
+        }
+        const row = e.target.closest('.explorer-trending-root .explorer-trend-row:not(.explorer-trend-row--set)');
         if (!row) return;
         const sc = row.getAttribute('data-set-code') || '';
         const num = row.getAttribute('data-card-number') || '';
         const nm = row.getAttribute('data-card-name') || '';
         openCardDetailModal(sc, num, nm);
     });
+
+    async function scrollExplorerToSetFromTrending(setCode) {
+        const lc = String(setCode || '').trim().toLowerCase();
+        if (!lc || !containerEl) return;
+        const el = containerEl.querySelector(`.set-item[data-set-code="${lc}"]`);
+        if (!el) return;
+        const set = allSets.find((s) => String(s.set_code || '').trim().toLowerCase() === lc);
+        document.querySelectorAll('#sets-container .set-item').forEach((x) => x.classList.remove('expanded'));
+        el.classList.add('expanded');
+        if (set) {
+            await maybeHydrateExplorerFullMetrics(set);
+            const ul = el.querySelector('.top-cards-list');
+            if (ul) ul.innerHTML = buildTopCardsListHtml(set);
+        }
+        el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
 
     function renderExplorerTrendingPanel(payload) {
         if (!trendingRoot) return;
@@ -731,19 +754,16 @@ document.addEventListener('DOMContentLoaded', () => {
                 <div class="explorer-trend-row__stat ${statClass || ''}">${statHtml}</div>
             </button>`;
         };
-        if (!payload || typeof payload !== 'object') {
-            trendingRoot.innerHTML = '<p class="explorer-trending-empty">Trending leaderboards are not available yet. Add the <code>explorer_trending_daily</code> asset (GitHub Action <code>Explorer trending daily</code>).</p>';
-            return;
-        }
-        const prior = Array.isArray(payload.prior_day_dollar_movers) ? payload.prior_day_dollar_movers : [];
-        const week = Array.isArray(payload.week_pct_movers) ? payload.week_pct_movers : [];
-        const grade = Array.isArray(payload.psa10_vs_raw_leaders) ? payload.psa10_vs_raw_leaders : [];
-        const when = payload.computed_at ? `<p class="explorer-trending-placeholder" style="margin:0 0 0.75rem;">Updated ${escHtml(String(payload.computed_at).slice(0, 16).replace('T', ' '))} UTC</p>` : '';
-        const block = (title, hint, rows, kind) => {
+        const trendDetails = (title, count, bodyHtml, { open = false } = {}) => {
+            const oc = open ? ' open' : '';
+            const badge = Number.isFinite(count) ? `<span class="explorer-trend-count">${count}</span>` : '';
+            return `<details class="explorer-trend-details"${oc}><summary class="explorer-trend-summary"><span class="explorer-trend-summary__title">${escHtml(title)}</span>${badge}</summary><div class="explorer-trend-details__body">${bodyHtml}</div></details>`;
+        };
+        const cardBlockBody = (rows, kind) => {
             if (!rows.length) {
-                return `<section class="explorer-trend-block"><h3 class="explorer-trend-block__title">${escHtml(title)}</h3><p class="explorer-trend-block__hint">${hint}</p><p class="explorer-trending-empty">No qualifying cards in the latest scan.</p></section>`;
+                return '<p class="explorer-trending-empty">No qualifying cards in the latest scan.</p>';
             }
-            const lis = rows.map((r) => {
+            return `<div class="explorer-trend-list">${rows.map((r) => {
                 if (kind === 'prior') {
                     const d = Number(r.delta_usd);
                     const cls = d >= 0 ? 'explorer-trend-row__stat--up' : 'explorer-trend-row__stat--down';
@@ -758,28 +778,83 @@ document.addEventListener('DOMContentLoaded', () => {
                 const ratio = Number(r.psa10_vs_raw_ratio);
                 const pct = r.psa10_vs_raw_pct != null ? `+${Number(r.psa10_vs_raw_pct).toFixed(0)}%` : `×${ratio.toFixed(2)}`;
                 return rowBtn(r, pct, 'explorer-trend-row__stat--up');
-            }).join('');
-            return `<section class="explorer-trend-block"><h3 class="explorer-trend-block__title">${escHtml(title)}</h3><p class="explorer-trend-block__hint">${hint}</p><div class="explorer-trend-list">${lis}</div></section>`;
+            }).join('')}</div>`;
         };
+        if (!payload || typeof payload !== 'object') {
+            trendingRoot.innerHTML = '<p class="explorer-trending-empty">Trending leaderboards are not available yet. Add the <code>explorer_trending_daily</code> asset (GitHub Action <code>Explorer trending daily</code>).</p>';
+            return;
+        }
+        const prior = Array.isArray(payload.prior_day_dollar_movers) ? payload.prior_day_dollar_movers : [];
+        const week = Array.isArray(payload.week_pct_movers) ? payload.week_pct_movers : [];
+        const grade = Array.isArray(payload.psa10_vs_raw_leaders) ? payload.psa10_vs_raw_leaders : [];
+        const chase = Array.isArray(payload.set_chase_by_tracked) ? payload.set_chase_by_tracked : [];
+        const packMv = Array.isArray(payload.set_pack_trend_pct) ? payload.set_pack_trend_pct : [];
+        const density = Array.isArray(payload.set_most_tracked) ? payload.set_most_tracked : [];
+        const packDays = Number(payload.pack_trend_days) || 14;
+        const when = payload.computed_at ? `<p class="explorer-trending-placeholder" style="margin:0 0 0.75rem;">Updated ${escHtml(String(payload.computed_at).slice(0, 16).replace('T', ' '))} UTC</p>` : '';
+
+        const maxChase = chase.reduce((m, r) => Math.max(m, Number(r.chase_sum_usd) || 0), 0);
+        const maxPackAbs = packMv.reduce((m, r) => Math.max(m, Math.abs(Number(r.pct_change) || 0)), 0);
+        const maxDen = density.reduce((m, r) => Math.max(m, Number(r.n_tracked) || 0), 0);
+
+        const setRowChase = (r) => {
+            const sc = escAttr(String(r.set_code || ''));
+            const v = Number(r.chase_sum_usd);
+            const w = maxChase > 0 ? Math.round((v / maxChase) * 100) : 0;
+            return `<button type="button" class="explorer-trend-row explorer-trend-row--set" data-set-code="${sc}">
+                <div class="explorer-trend-row__main">
+                    <div class="explorer-trend-row__name">${escHtml(String(r.set_name || r.set_code || '—'))}</div>
+                    <div class="explorer-trend-mini-bar-track" aria-hidden="true"><div class="explorer-trend-mini-bar-fill" style="width:${w}%"></div></div>
+                </div>
+                <div class="explorer-trend-row__stat">${fmt(v)}</div>
+            </button>`;
+        };
+        const setRowPack = (r) => {
+            const sc = escAttr(String(r.set_code || ''));
+            const p = Number(r.pct_change);
+            const w = maxPackAbs > 0 ? Math.round((Math.abs(p) / maxPackAbs) * 100) : 0;
+            const cls = p >= 0 ? 'explorer-trend-row__stat--up' : 'explorer-trend-row__stat--down';
+            return `<button type="button" class="explorer-trend-row explorer-trend-row--set" data-set-code="${sc}">
+                <div class="explorer-trend-row__main">
+                    <div class="explorer-trend-row__name">${escHtml(String(r.set_name || r.set_code || '—'))}</div>
+                    <div class="explorer-trend-mini-bar-track" aria-hidden="true"><div class="explorer-trend-mini-bar-fill explorer-trend-mini-bar-fill--accent" style="width:${w}%"></div></div>
+                </div>
+                <div class="explorer-trend-row__stat ${cls}">${p >= 0 ? '+' : ''}${p.toFixed(1)}%</div>
+            </button>`;
+        };
+        const setRowDen = (r) => {
+            const sc = escAttr(String(r.set_code || ''));
+            const n = Number(r.n_tracked);
+            const w = maxDen > 0 ? Math.round((n / maxDen) * 100) : 0;
+            return `<button type="button" class="explorer-trend-row explorer-trend-row--set" data-set-code="${sc}">
+                <div class="explorer-trend-row__main">
+                    <div class="explorer-trend-row__name">${escHtml(String(r.set_name || r.set_code || '—'))}</div>
+                    <div class="explorer-trend-mini-bar-track" aria-hidden="true"><div class="explorer-trend-mini-bar-fill explorer-trend-mini-bar-fill--muted" style="width:${w}%"></div></div>
+                </div>
+                <div class="explorer-trend-row__stat">${n}</div>
+            </button>`;
+        };
+
+        const setsPackParts = [];
+        if (chase.length) {
+            setsPackParts.push(`<h4 class="explorer-trend-subh">Chase value (sum of top 10 tracked $)</h4><div class="explorer-trend-list">${chase.map(setRowChase).join('')}</div>`);
+        }
+        if (packMv.length) {
+            setsPackParts.push(`<h4 class="explorer-trend-subh">Pack cost Δ% (${packDays}d)</h4><div class="explorer-trend-list">${packMv.map(setRowPack).join('')}</div>`);
+        }
+        if (density.length) {
+            setsPackParts.push(`<h4 class="explorer-trend-subh">Tracked cards per set</h4><div class="explorer-trend-list">${density.map(setRowDen).join('')}</div>`);
+        }
+        const setsPackBody = setsPackParts.length
+            ? setsPackParts.join('')
+            : '<p class="explorer-trending-empty">No set-level pack or chase aggregates yet (run pack-cost sync + Explorer trending).</p>';
+        const setsPackCount = chase.length + packMv.length + density.length;
+
         trendingRoot.innerHTML = when
-            + block(
-                'Prior-day price movers',
-                'Largest day-over-day move on daily close (Collectrics JustTCG when present, else TCGGO market USD from synced history; tracked cards).',
-                prior,
-                'prior',
-            )
-            + block(
-                '7-day % movers',
-                '% change vs the last available daily close on or before seven days ago (same blended series as prior-day).',
-                week,
-                'week',
-            )
-            + block(
-                'PSA 10 vs raw lift',
-                'TCGGO eBay sold medians: PSA 10 vs raw / ungraded (robust medians; extreme ratios omitted).',
-                grade,
-                'grade',
-            );
+            + trendDetails('Sets & packs', setsPackCount, setsPackBody, { open: true })
+            + trendDetails('Prior-day movers', prior.length, cardBlockBody(prior, 'prior'), { open: false })
+            + trendDetails('7-day % movers', week.length, cardBlockBody(week, 'week'), { open: false })
+            + trendDetails('PSA 10 vs raw lift', grade.length, cardBlockBody(grade, 'grade'), { open: false });
     }
 
     async function loadAndRenderExplorerTrending() {

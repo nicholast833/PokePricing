@@ -9,10 +9,14 @@ Inspired by Collectrics-style boards (prior-day movers, graded vs raw lift):
   - week_pct_movers — same blended series vs best point on or before ~7d before latest
   - psa10_vs_raw_leaders — PSA 10 vs raw from ``tcggo_ebay_sold_prices`` with robust medians
     (no ``min()`` over mislabeled grades; ratio sanity cap via ``EXPLORER_TRENDING_MAX_PSA_RAW_RATIO``).
+  - set_chase_by_tracked — per-set sum of top 10 ``market_price`` among tracked cards (chase proxy).
+  - set_pack_trend_pct — largest |%| pack moves from ``pokemon_set_pack_pricing.pack_cost_price_history``.
+  - set_most_tracked — tracked card counts per set.
 
 Env: ``SUPABASE_URL`` + ``SUPABASE_SERVICE_ROLE_KEY`` or ``SUPABASE_KEY``.
 Optional: ``EXPLORER_TRENDING_MAX_PSA_RAW_RATIO`` (default ``75``) drops PSA10/raw rows above this ratio
 from ``psa10_vs_raw_leaders`` (guards mislabeled TCGGO grade rows).
+Optional: ``EXPLORER_PACK_TREND_DAYS`` (default ``14``) lookback for pack % trend.
 
   python github_actions/build_explorer_trending_from_supabase.py
   python github_actions/build_explorer_trending_from_supabase.py --dry-run
@@ -26,6 +30,7 @@ import math
 import os
 import re
 import sys
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -195,7 +200,7 @@ def _prior_day_move(pts: List[Tuple[str, float]]) -> Optional[Dict[str, Any]]:
     }
 
 
-def _week_pct_move(pts: List[Tuple[str, float]]) -> Optional[Dict[str, Any]]:
+def _pct_move_days(pts: List[Tuple[str, float]], days: int) -> Optional[Dict[str, Any]]:
     if len(pts) < 2:
         return None
     last_d, last_p = pts[-1]
@@ -203,7 +208,7 @@ def _week_pct_move(pts: List[Tuple[str, float]]) -> Optional[Dict[str, Any]]:
         last_dt = datetime.strptime(last_d, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     except ValueError:
         return None
-    cut = last_dt - timedelta(days=7)
+    cut = last_dt - timedelta(days=int(days))
     ref_p = None
     ref_d = None
     for d, p in pts:
@@ -223,6 +228,10 @@ def _week_pct_move(pts: List[Tuple[str, float]]) -> Optional[Dict[str, Any]]:
         "from_price_usd": round(ref_p, 4),
         "to_price_usd": round(last_p, 4),
     }
+
+
+def _week_pct_move(pts: List[Tuple[str, float]]) -> Optional[Dict[str, Any]]:
+    return _pct_move_days(pts, 7)
 
 
 _SLAB_GRADER_RE = re.compile(
@@ -327,6 +336,139 @@ def _card_summary(flat: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _fetch_set_name_map(client: Any) -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    page = 800
+    start = 0
+    while True:
+        res = (
+            client.table("pokemon_sets")
+            .select("set_code,name,metadata")
+            .order("set_code")
+            .range(start, start + page - 1)
+            .execute()
+        )
+        batch = res.data or []
+        for r in batch:
+            if not isinstance(r, dict):
+                continue
+            sc = str(r.get("set_code") or "").strip().lower()
+            if not sc:
+                continue
+            nm = str(r.get("name") or r.get("set_name") or "").strip()
+            if not nm:
+                meta = r.get("metadata") if isinstance(r.get("metadata"), dict) else {}
+                nm = str(meta.get("set_name") or meta.get("title") or "").strip()
+            out[sc] = nm or sc
+        if len(batch) < page:
+            break
+        start += page
+    return out
+
+
+def _pack_price_pts_from_row(row: Dict[str, Any]) -> List[Tuple[str, float]]:
+    hist = row.get("pack_cost_price_history")
+    if not isinstance(hist, list):
+        return []
+    out: List[Tuple[str, float]] = []
+    for r in hist:
+        if not isinstance(r, dict):
+            continue
+        dk = str(r.get("date") or "")[:10]
+        if len(dk) < 10:
+            continue
+        p = _num(r.get("price_usd"))
+        if p is None or p <= 0:
+            p = _num(r.get("tcg_player_market"))
+        if p is None or p <= 0:
+            continue
+        out.append((dk, p))
+    out.sort(key=lambda t: t[0])
+    return out
+
+
+def _build_set_chase_from_tracked(raw_rows: List[Dict[str, Any]], names: Dict[str, str]) -> List[Dict[str, Any]]:
+    by_prices: Dict[str, List[float]] = defaultdict(list)
+    for raw in raw_rows:
+        flat = _card_row_to_toplist_shape(raw)
+        sc = str(flat.get("set_code") or "").strip().lower()
+        p = _num(flat.get("market_price"))
+        if not sc or p is None or p <= 0:
+            continue
+        by_prices[sc].append(float(p))
+    rows: List[Dict[str, Any]] = []
+    for sc, prices in by_prices.items():
+        prices.sort(reverse=True)
+        n_take = min(10, len(prices))
+        chase = sum(prices[:n_take])
+        rows.append(
+            {
+                "set_code": sc,
+                "set_name": names.get(sc, sc),
+                "chase_sum_usd": round(chase, 2),
+                "n_tracked": len(prices),
+            }
+        )
+    rows.sort(key=lambda r: float(r.get("chase_sum_usd") or 0), reverse=True)
+    return rows[:_TOP_N]
+
+
+def _build_set_most_tracked(raw_rows: List[Dict[str, Any]], names: Dict[str, str]) -> List[Dict[str, Any]]:
+    counts: Dict[str, int] = defaultdict(int)
+    for raw in raw_rows:
+        flat = _card_row_to_toplist_shape(raw)
+        sc = str(flat.get("set_code") or "").strip().lower()
+        if not sc:
+            continue
+        counts[sc] += 1
+    rows = [
+        {"set_code": sc, "set_name": names.get(sc, sc), "n_tracked": n}
+        for sc, n in counts.items()
+    ]
+    rows.sort(key=lambda r: int(r.get("n_tracked") or 0), reverse=True)
+    return rows[:_TOP_N]
+
+
+def _build_set_pack_trends(names: Dict[str, str], pack_rows: List[Dict[str, Any]], days: int) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for row in pack_rows:
+        if not isinstance(row, dict):
+            continue
+        sc = str(row.get("set_code") or "").strip().lower()
+        if not sc:
+            continue
+        pts = _pack_price_pts_from_row(row)
+        mv = _pct_move_days(pts, days)
+        if mv is None or abs(float(mv.get("pct_change") or 0)) < 0.25:
+            continue
+        out.append(
+            {
+                "set_code": sc,
+                "set_name": names.get(sc, sc),
+                "pct_change": mv["pct_change"],
+                "from_date": mv.get("from_date"),
+                "to_date": mv.get("to_date"),
+                "from_price_usd": mv.get("from_price_usd"),
+                "to_price_usd": mv.get("to_price_usd"),
+            }
+        )
+    out.sort(key=lambda r: abs(float(r.get("pct_change") or 0)), reverse=True)
+    return out[:_TOP_N]
+
+
+def _fetch_pack_pricing_rows(client: Any) -> List[Dict[str, Any]]:
+    try:
+        res = (
+            client.table("pokemon_set_pack_pricing")
+            .select("set_code,pack_cost_price_history,pack_cost_primary_usd")
+            .execute()
+        )
+        data = res.data or []
+        return [x for x in data if isinstance(x, dict)]
+    except Exception:
+        return []
+
+
 def _fetch_tracked_cards(client: Any) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     start = 0
@@ -357,6 +499,12 @@ def main() -> int:
     client = _supabase()
     rows = _fetch_tracked_cards(client)
     now_iso = datetime.now(timezone.utc).isoformat()
+    pack_days = max(3, min(int(os.environ.get("EXPLORER_PACK_TREND_DAYS", "14")), 120))
+    set_names = _fetch_set_name_map(client)
+    pack_rows = _fetch_pack_pricing_rows(client)
+    set_chase = _build_set_chase_from_tracked(rows, set_names)
+    set_tracked = _build_set_most_tracked(rows, set_names)
+    set_pack = _build_set_pack_trends(set_names, pack_rows, pack_days)
 
     prior: List[Dict[str, Any]] = []
     week: List[Dict[str, Any]] = []
@@ -384,6 +532,10 @@ def main() -> int:
 
     payload = {
         "computed_at": now_iso,
+        "pack_trend_days": pack_days,
+        "set_chase_by_tracked": set_chase,
+        "set_most_tracked": set_tracked,
+        "set_pack_trend_pct": set_pack,
         "prior_day_dollar_movers": prior[:_TOP_N],
         "week_pct_movers": week[:_TOP_N],
         "psa10_vs_raw_leaders": grade[:_TOP_N],
@@ -392,6 +544,10 @@ def main() -> int:
     if args.dry_run:
         summary = {
             "computed_at": payload.get("computed_at"),
+            "pack_trend_days": payload.get("pack_trend_days"),
+            "set_chase_by_tracked": len(payload.get("set_chase_by_tracked") or []),
+            "set_most_tracked": len(payload.get("set_most_tracked") or []),
+            "set_pack_trend_pct": len(payload.get("set_pack_trend_pct") or []),
             "prior_day_dollar_movers": len(payload.get("prior_day_dollar_movers") or []),
             "week_pct_movers": len(payload.get("week_pct_movers") or []),
             "psa10_vs_raw_leaders": len(payload.get("psa10_vs_raw_leaders") or []),
