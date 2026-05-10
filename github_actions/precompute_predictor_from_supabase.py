@@ -108,9 +108,11 @@ def main() -> int:
         if sc:
             set_by_code[sc] = _merge_set_row(s)
 
+    # Keep columns that exist on ``pokemon_cards``; pull odds / PC / Gemrate live under ``metrics``
+    # (flattened by ``_card_row_to_toplist_shape`` — same pattern as ``supabase-config.js`` embed).
     card_select = (
         "unique_card_id,set_code,name,number,rarity,market_price,artist,image_url,"
-        "metrics,card_pull_rate,rarity_ordinal,psa_graded_pop_total,tracked_priority"
+        "metrics,tracked_priority"
     )
     print("Fetching pokemon_cards ...", flush=True)
     raw_cards = _fetch_paginated(
