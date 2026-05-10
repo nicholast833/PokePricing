@@ -36,7 +36,8 @@ on:
         type: boolean
         default: false
   schedule:
-    - cron: "0 10 * * 3"
+    # Thu 03:00 UTC (~7 PM PST Wed): Wizard + GemRate scrapes; no TCGGO API.
+    - cron: "0 3 * * 4"
 
 jobs:
   wizard_then_gemrate:

@@ -1,11 +1,12 @@
 # Computes Collectrics-style leaderboards for tracked cards and upserts
 # predictor_analytics_assets.explorer_trending_daily (read by Explorer index.html).
+# Runs ~1h20 after Daily PokePricing Data Sync (reads Supabase card rows / price_history).
 name: Explorer trending daily
 
 on:
   workflow_dispatch: {}
   schedule:
-    - cron: "25 7 * * *"
+    - cron: "20 0 * * *"
 
 jobs:
   trending:

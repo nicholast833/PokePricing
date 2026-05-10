@@ -3,6 +3,7 @@
 #
 # Secrets: SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY (and SUPABASE_KEY if your scripts expect it).
 # Optional sync: PREDICTOR_ANALYTICS_JSON_DIR secret or tracked files under data/assets/.
+# Scheduled ~3h after Daily PokePricing Data Sync so card rows are usually settled (UTC evening).
 name: Predictor analytics pipeline
 
 on:
@@ -17,7 +18,7 @@ on:
         type: boolean
         default: false
   schedule:
-    - cron: "40 6 * * *"
+    - cron: "45 2 * * *"
 
 jobs:
   pipeline:

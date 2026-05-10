@@ -3,8 +3,9 @@ name: Refresh TCGGO tracked top-25
 on:
   workflow_dispatch: {}
   schedule:
-    # ~every 3 days (UTC); pairs with TCGGO_TRACKED_TOP25_MAX_CALLS budget (~200) per run.
-    - cron: "0 7 */3 * *"
+    # Weekly Mon 01:00 UTC (~5 PM PST Sun): refreshes tracked top lists before the weekday queue;
+    # avoids stacking with the 23:00 UTC daily TCGGO sync. Dispatch manually for extra runs.
+    - cron: "0 1 * * 1"
 
 jobs:
   refresh:
