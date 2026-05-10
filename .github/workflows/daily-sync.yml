@@ -1,6 +1,8 @@
 # run_daily_api_queue merges TCGGO daily points and appends eBay anonymous cohort history.
 # Optional secrets/env: EBAY_LISTING_HASH_SALT (stable hashed listing ids); caps: TCGGO_MERGED_MAX_POINTS,
 # WIZARD_MERGED_MAX_ROWS (Wizard merge on apply-wizard), EBAY_ANONYMOUS_HISTORY_MAX, EBAY_ACTIVE_PRICE_HISTORY_MAX.
+# eBay Buy Browse (active listings): EBAY_BROWSE_LIMIT_PER_PAGE (default 200), EBAY_BROWSE_MAX_PAGES (default 5),
+# EBAY_BROWSE_SNAPSHOTS_CAP (max price rows stored in card metrics JSON per fetch).
 name: Daily PokePricing Data Sync
 
 on:

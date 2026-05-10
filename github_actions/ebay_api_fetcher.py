@@ -4,8 +4,10 @@
 results for new keys, GitHub Actions IPs, or policy limits. **Buy Browse** cannot return sold
 items — only **active** listings (OAuth: ``EBAY_APP_ID`` + ``EBAY_CERT_ID``).
 
-``run_daily_api_queue`` uses **Buy Browse** via ``fetch_ebay_active_listing_snapshot`` (hit
-``total`` plus a few **price-only** listing rows for the UI; item ids/titles/URLs are not stored).
+``run_daily_api_queue`` uses **Buy Browse** via ``fetch_ebay_active_listing_snapshot`` (paginated
+``total`` + **price-only** rows; item ids/titles/URLs are not stored). Tune with
+``EBAY_BROWSE_LIMIT_PER_PAGE`` (default 200), ``EBAY_BROWSE_MAX_PAGES`` (default 5),
+``EBAY_BROWSE_SNAPSHOTS_CAP`` (max rows stored in metrics JSON).
 
 ``anonymous_cohort`` holds SHA-256(itemId + salt) plus rounded USD for day-over-day “listing
 ended” heuristics without persisting eBay listing identifiers.
@@ -287,10 +289,10 @@ def ebay_listing_hash_salt(app_id: str, cert_id: str) -> str:
     return hashlib.sha256(f"{app_id}|{cert_id}|ebay_anon_v1".encode("utf-8")).hexdigest()
 
 
-def ebay_redacted_active_snapshots(item_summaries: List[Dict[str, Any]], limit: int) -> List[Dict[str, Any]]:
+def ebay_redacted_active_snapshots(item_summaries: List[Dict[str, Any]], max_items: int) -> List[Dict[str, Any]]:
     """Buy Browse item summaries reduced to non-identifying price fields only."""
     out: List[Dict[str, Any]] = []
-    lim = max(1, min(int(limit), 50))
+    lim = max(0, int(max_items))
     for raw in item_summaries[:lim]:
         if not isinstance(raw, dict):
             continue
@@ -314,11 +316,11 @@ def ebay_anonymous_listing_cohort(
     item_summaries: List[Dict[str, Any]],
     *,
     salt: str,
-    limit: int,
+    max_items: int,
 ) -> List[Dict[str, Any]]:
     """SHA-256(itemId + salt) per sampled listing + rounded BIN price (no titles or URLs)."""
     out: List[Dict[str, Any]] = []
-    lim = max(1, min(int(limit), 50))
+    lim = max(0, int(max_items))
     for raw in item_summaries[:lim]:
         if not isinstance(raw, dict):
             continue
@@ -338,27 +340,8 @@ def ebay_anonymous_listing_cohort(
     return out
 
 
-def fetch_ebay_active_listing_snapshot(
-    keywords: str,
-    *,
-    app_id: str,
-    cert_id: str,
-    limit: int = 5,
-    marketplace_id: Optional[str] = None,
-) -> Dict[str, Any]:
-    """
-    **Buy Browse API** — active listings only (eBay does not expose completed sales here).
-
-    Returns ``total`` from the API, **price-only** ``snapshots`` (no titles or listing URLs),
-    and ``anonymous_cohort`` (hashed listing ids + rounded prices) for longitudinal storage.
-    """
-    mp = (marketplace_id or os.environ.get("EBAY_MARKETPLACE_ID") or "EBAY_US").strip()
-    token = _get_browse_oauth_token(app_id, cert_id)
-    qenc = urllib.parse.urlencode(
-        {"q": keywords[:350], "limit": str(max(1, min(int(limit), 50)))}
-    )
-    url = f"{_ebay_api_base()}/buy/browse/v1/item_summary/search?{qenc}"
-    resp = requests.get(
+def _browse_item_search_get(token: str, mp: str, url: str) -> requests.Response:
+    return requests.get(
         url,
         headers={
             "Authorization": f"Bearer {token}",
@@ -366,51 +349,114 @@ def fetch_ebay_active_listing_snapshot(
             "Content-Type": "application/json",
             "User-Agent": "PokemonTCG-Explorer/github_actions (Buy Browse)",
         },
-        timeout=45,
+        timeout=55,
     )
-    if resp.status_code == 401:
-        invalidate_browse_oauth_cache()
-        token = _get_browse_oauth_token(app_id, cert_id)
-        resp = requests.get(
-            url,
-            headers={
-                "Authorization": f"Bearer {token}",
-                "X-EBAY-C-MARKETPLACE-ID": mp,
-                "Content-Type": "application/json",
-                "User-Agent": "PokemonTCG-Explorer/github_actions (Buy Browse)",
-            },
-            timeout=45,
-        )
+
+
+def fetch_ebay_active_listing_snapshot(
+    keywords: str,
+    *,
+    app_id: str,
+    cert_id: str,
+    limit_per_page: int = 200,
+    max_pages: int = 5,
+    marketplace_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    **Buy Browse API** — active listings only (eBay does not expose completed sales here).
+
+    Paginates with ``limit`` (1–200 per eBay) and ``offset`` up to ``max_pages`` calls.
+    Listings that delist between pages or rank off search are an accepted accuracy tradeoff.
+
+    Returns ``total`` (first page), **price-only** ``snapshots``, ``anonymous_cohort``,
+    plus ``pages_fetched`` and ``items_fetched`` for logging.
+    """
+    mp = (marketplace_id or os.environ.get("EBAY_MARKETPLACE_ID") or "EBAY_US").strip()
+    token = _get_browse_oauth_token(app_id, cert_id)
+    lim_pp = max(1, min(int(limit_per_page), 200))
+    max_pg = max(1, min(int(max_pages), 50))
+
     out: Dict[str, Any] = {
-        "http_status": resp.status_code,
+        "http_status": 0,
         "search_url": "https://www.ebay.com/sch/i.html?" + urllib.parse.urlencode({"_nkw": keywords[:350]}),
         "total": None,
         "snapshots": [],
         "anonymous_cohort": [],
         "raw_error": None,
+        "pages_fetched": 0,
+        "items_fetched": 0,
     }
-    try:
-        data = resp.json()
-    except Exception:
-        out["raw_error"] = resp.text[:800]
-        return out
 
-    if resp.status_code != 200:
-        out["raw_error"] = str(data)[:800]
-        return out
+    all_summaries: List[Dict[str, Any]] = []
+    offset = 0
+    last_http = 0
+    last_err: Optional[str] = None
 
-    tot = data.get("total")
-    if tot is not None:
+    for page in range(max_pg):
+        qenc = urllib.parse.urlencode(
+            {"q": keywords[:350], "limit": str(lim_pp), "offset": str(offset)}
+        )
+        url = f"{_ebay_api_base()}/buy/browse/v1/item_summary/search?{qenc}"
+        resp = _browse_item_search_get(token, mp, url)
+        last_http = resp.status_code
+        if resp.status_code == 401:
+            invalidate_browse_oauth_cache()
+            token = _get_browse_oauth_token(app_id, cert_id)
+            resp = _browse_item_search_get(token, mp, url)
+            last_http = resp.status_code
+
         try:
-            out["total"] = int(tot)
-        except (TypeError, ValueError):
-            out["total"] = tot
+            data = resp.json()
+        except Exception:
+            last_err = resp.text[:800]
+            break
 
-    summaries = data.get("itemSummaries") if isinstance(data.get("itemSummaries"), list) else []
-    lim = max(1, min(int(limit), 50))
+        if resp.status_code != 200:
+            last_err = str(data)[:800] if isinstance(data, dict) else str(data)[:800]
+            break
+
+        if page == 0:
+            tot = data.get("total")
+            if tot is not None:
+                try:
+                    out["total"] = int(tot)
+                except (TypeError, ValueError):
+                    out["total"] = tot
+
+        summaries = data.get("itemSummaries") if isinstance(data.get("itemSummaries"), list) else []
+        all_summaries.extend([x for x in summaries if isinstance(x, dict)])
+        out["pages_fetched"] = page + 1
+
+        if len(summaries) < lim_pp:
+            break
+        offset += lim_pp
+        if offset >= 10000:
+            break
+
+    out["http_status"] = last_http
+
+    # Dedupe by itemId across pages (same listing must not double-count cohort / medians).
+    seen: set[str] = set()
+    deduped: List[Dict[str, Any]] = []
+    for raw in all_summaries:
+        iid = raw.get("itemId") or raw.get("item_id")
+        key = str(iid).strip() if iid is not None else ""
+        if key:
+            if key in seen:
+                continue
+            seen.add(key)
+        deduped.append(raw)
+
+    cap = max(1, int(os.environ.get("EBAY_BROWSE_SNAPSHOTS_CAP", "2000")))
     salt = ebay_listing_hash_salt(app_id, cert_id)
-    out["snapshots"] = ebay_redacted_active_snapshots(summaries, lim)
-    out["anonymous_cohort"] = ebay_anonymous_listing_cohort(summaries, salt=salt, limit=lim)
+    out["items_fetched"] = len(deduped)
+    out["snapshots"] = ebay_redacted_active_snapshots(deduped, cap)
+    out["anonymous_cohort"] = ebay_anonymous_listing_cohort(deduped, salt=salt, max_items=cap)
+
+    if last_err and not deduped:
+        out["raw_error"] = last_err
+    elif last_err and deduped:
+        out["partial_error"] = last_err
     return out
 
 

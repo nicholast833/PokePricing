@@ -176,14 +176,32 @@ def run_queue():
                 query = build_ebay_active_search_query(row_for_q)
                 logging.info(f"  -> eBay Browse (active) q={query[:120]!r}")
                 try:
+                    browse_lpp = max(1, min(int(os.environ.get("EBAY_BROWSE_LIMIT_PER_PAGE", "200")), 200))
+                    browse_pages = max(1, min(int(os.environ.get("EBAY_BROWSE_MAX_PAGES", "5")), 50))
                     snap = fetch_ebay_active_listing_snapshot(
-                        query, app_id=ebay_app_id, cert_id=ebay_cert_id, limit=5
+                        query,
+                        app_id=ebay_app_id,
+                        cert_id=ebay_cert_id,
+                        limit_per_page=browse_lpp,
+                        max_pages=browse_pages,
                     )
                     st = snap.get("http_status")
                     tot = snap.get("total")
                     n_sn = len(snap.get("snapshots") or [])
-                    if st == 200:
-                        logging.info(f"  -> eBay Browse: HTTP {st} total={tot!r} snapshots={n_sn}")
+                    n_coh = len(snap.get("anonymous_cohort") or [])
+                    pf = int(snap.get("pages_fetched") or 0)
+                    n_items = int(snap.get("items_fetched") or 0)
+                    got_data = n_sn > 0 or n_coh > 0
+                    if snap.get("partial_error"):
+                        logging.warning(
+                            f"  -> eBay Browse: partial after page {pf} (using {n_items} items): "
+                            f"{str(snap.get('partial_error'))[:180]!r}"
+                        )
+                    if got_data:
+                        logging.info(
+                            f"  -> eBay Browse: HTTP {st} total={tot!r} pages={pf} items={n_items} "
+                            f"snapshots={n_sn} cohort={n_coh}"
+                        )
                         metrics["ebay_active_total"] = tot
                         metrics["ebay_active_snapshots"] = snap.get("snapshots") or []
                         metrics["ebay_active_search_url"] = snap.get("search_url")
@@ -225,7 +243,7 @@ def run_queue():
                             keep = max(31, int(os.environ.get("EBAY_ACTIVE_PRICE_HISTORY_MAX", "400")))
                             hist = hist[-keep:]
                             price_history["ebay_active_price_history"] = hist
-                    else:
+                    elif not got_data:
                         logging.warning(
                             f"  -> eBay Browse: HTTP {st} total={tot!r} err={str(snap.get('raw_error'))[:200]!r}"
                         )
