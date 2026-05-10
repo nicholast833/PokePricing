@@ -1,0 +1,31 @@
+name: Refresh TCGGO tracked top-25
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    # ~every 3 days (UTC); pairs with TCGGO_TRACKED_TOP25_MAX_CALLS budget (~200) per run.
+    - cron: "0 7 */3 * *"
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: github_actions/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r github_actions/requirements.txt
+
+      - name: Refresh per-set tracked ranks (TCGGO price_highest)
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          TCGPRO_API_KEY: ${{ secrets.TCGPRO_API_KEY }}
+          TCGGO_TRACKED_TOP25_MAX_CALLS: "200"
+          TCGGO_EPISODE_LIST_MAX_PAGES: "22"
+        run: python github_actions/refresh_tcggo_tracked_top25.py

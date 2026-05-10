@@ -1,10 +1,11 @@
 import json
+import os
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import date, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 RAPIDAPI_HOST = "pokemon-tcg-api.p.rapidapi.com"
 HISTORY_PATH = "/history-prices"
@@ -23,7 +24,7 @@ def tcggo_gateway_headers_query(key: str, query: Dict[str, str]) -> tuple[Dict[s
         
     return headers, params
 
-def fetch_tcggo_price_history(tcggo_id: int, api_key: str, days: int = 730) -> Optional[Dict[str, Any]]:
+def fetch_tcggo_price_history(tcggo_id: int, api_key: str, days: int = 90) -> Optional[Dict[str, Any]]:
     """Backward-compatible: history for a TCGGO **internal** entity id (cards or products)."""
     return fetch_tcggo_price_history_query(
         api_key,
@@ -35,7 +36,7 @@ def fetch_tcggo_price_history(tcggo_id: int, api_key: str, days: int = 730) -> O
 def fetch_tcggo_price_history_query(
     api_key: str,
     *,
-    days: int = 730,
+    days: int = 90,
     tcggo_id: Optional[int] = None,
     tcgplayer_id: Optional[int] = None,
     cardmarket_id: Optional[int] = None,
@@ -43,6 +44,9 @@ def fetch_tcggo_price_history_query(
     """
     GET /history-prices — TCGGO supports lookup by internal id, TCGPlayer product id, or Cardmarket id
     (see API docs: Historical Prices). Exactly one of tcggo_id / tcgplayer_id / cardmarket_id must be set.
+
+    The gateway paginates: each ``page`` returns a limited number of daily rows (~30). We merge pages
+    up to ``TCGGO_HISTORY_PRICES_MAX_PAGES`` (default **3**) within the ``days`` window (default **90** ≈ 3 months).
     """
     n = sum(1 for x in (tcggo_id, tcgplayer_id, cardmarket_id) if x is not None)
     if n != 1:
@@ -51,34 +55,78 @@ def fetch_tcggo_price_history_query(
     end = date.today()
     start = end - timedelta(days=max(1, days))
 
-    q: Dict[str, str] = {
+    base: Dict[str, str] = {
         "date_from": start.isoformat(),
         "date_to": end.isoformat(),
-        "page": "1",
         "sort": "desc",
     }
     if tcggo_id is not None:
-        q["id"] = str(int(tcggo_id))
+        base["id"] = str(int(tcggo_id))
     elif tcgplayer_id is not None:
-        q["tcgplayer_id"] = str(int(tcgplayer_id))
+        base["tcgplayer_id"] = str(int(tcgplayer_id))
     else:
-        q["cardmarket_id"] = str(int(cardmarket_id))
+        base["cardmarket_id"] = str(int(cardmarket_id))
 
-    headers, query_params = tcggo_gateway_headers_query(api_key, q)
-    url = f"https://{RAPIDAPI_HOST}{HISTORY_PATH}?{urllib.parse.urlencode(query_params)}"
+    merged: Dict[str, Any] = {}
+    last_raw: Optional[Dict[str, Any]] = None
+    max_pages = max(1, int(os.environ.get("TCGGO_HISTORY_PRICES_MAX_PAGES", "3")))
+    page = 1
+    pages_fetched = 0
+    while page <= max_pages:
+        q = dict(base)
+        q["page"] = str(page)
+        headers, query_params = tcggo_gateway_headers_query(api_key, q)
+        url = f"https://{RAPIDAPI_HOST}{HISTORY_PATH}?{urllib.parse.urlencode(query_params)}"
+        req = urllib.request.Request(url, headers=headers, method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=55) as resp:
+                body = resp.read().decode("utf-8", errors="replace")
+                raw = json.loads(body)
+        except urllib.error.HTTPError as e:
+            err_body = e.read().decode("utf-8", errors="replace")
+            raise Exception(f"HTTP {e.code}: {err_body[:500]}")
+        except Exception as e:
+            raise Exception(f"Request Error: {e}")
 
-    req = urllib.request.Request(url, headers=headers, method="GET")
+        last_raw = raw if isinstance(raw, dict) else last_raw
+        if not isinstance(raw, dict):
+            break
+        data = raw.get("data")
+        if not isinstance(data, dict) or not data:
+            break
+        before = len(merged)
+        merged.update(data)
+        added_dates = len(merged) - before
+        pages_fetched = page
 
-    try:
-        with urllib.request.urlopen(req, timeout=45) as resp:
-            body = resp.read().decode("utf-8", errors="replace")
-            return json.loads(body)
+        paging = raw.get("paging") if isinstance(raw.get("paging"), dict) else {}
+        if not paging and isinstance(raw.get("meta"), dict):
+            paging = raw["meta"]  # type: ignore[assignment]
+        cur = paging.get("current_page") or paging.get("currentPage") or page
+        last = paging.get("last_page") or paging.get("lastPage")
+        if last is not None:
+            try:
+                if int(cur) >= int(last):
+                    break
+            except (TypeError, ValueError):
+                pass
 
-    except urllib.error.HTTPError as e:
-        err_body = e.read().decode("utf-8", errors="replace")
-        raise Exception(f"HTTP {e.code}: {err_body[:500]}")
-    except Exception as e:
-        raise Exception(f"Request Error: {e}")
+        if added_dates == 0:
+            break
+        if page > 1 and added_dates < 12:
+            break
+
+        page += 1
+        time.sleep(max(0.0, float(os.environ.get("TCGGO_HISTORY_PAGE_SLEEP_S", "0.12") or "0.12")))
+
+    if not merged:
+        return last_raw
+    out: Dict[str, Any] = {"data": merged}
+    if isinstance(last_raw, dict) and last_raw.get("meta") is not None:
+        out["meta"] = last_raw.get("meta")
+    out["_tcggo_pages_fetched"] = pages_fetched or 1
+    out["_tcggo_points_merged"] = len(merged)
+    return out
 
 
 def _tcggo_get_json(api_key: str, path: str, query: Optional[Dict[str, str]] = None) -> Any:
@@ -183,23 +231,60 @@ def find_tcggo_product_row_for_tcgplayer_id(
     return None
 
 
-def fetch_all_episodes(api_key: str, *, sleep_s: float = 0.35) -> List[Dict[str, Any]]:
-    """GET /episodes (paginated) — same pattern as backfill_tcggo_ids."""
+def fetch_all_episodes(
+    api_key: str,
+    *,
+    sleep_s: float = 0.35,
+    max_pages: Optional[int] = None,
+) -> Tuple[List[Dict[str, Any]], int]:
+    """GET /episodes (paginated) — same pattern as backfill_tcggo_ids.
+
+    ``max_pages`` caps TCGGO calls when refreshing large batches on a tight quota.
+    Returns ``(episodes, http_calls_made)``.
+    """
     all_rows: List[Dict[str, Any]] = []
     page = 1
+    http_calls = 0
     while True:
+        if max_pages is not None and page > int(max_pages):
+            break
         q = {"page": str(page)}
         try:
             raw = _tcggo_get_json(api_key, "/episodes", q)
         except Exception:
             break
+        http_calls += 1
         chunk = raw.get("data") if isinstance(raw, dict) else None
         if not isinstance(chunk, list) or not chunk:
             break
         all_rows.extend([x for x in chunk if isinstance(x, dict)])
         page += 1
         time.sleep(max(0.0, sleep_s))
-    return all_rows
+    return all_rows, http_calls
+
+
+def fetch_episode_cards_top(
+    api_key: str,
+    episode_id: int,
+    *,
+    per_page: int = 25,
+    sort: str = "price_highest",
+    page: int = 1,
+) -> List[Dict[str, Any]]:
+    """
+    GET ``/episodes/{episodeId}/cards`` — one page, sorted by TCGGO list price (e.g. ``price_highest``).
+
+    Used to refresh per-set ``tracked_priority`` (top-N expensive singles) within a fixed API budget.
+    """
+    q = {"per_page": str(max(1, min(100, int(per_page)))), "page": str(max(1, page)), "sort": sort}
+    try:
+        raw = _tcggo_get_json(api_key, f"/episodes/{int(episode_id)}/cards", q)
+    except Exception:
+        return []
+    data = raw.get("data") if isinstance(raw, dict) else None
+    if isinstance(data, list):
+        return [x for x in data if isinstance(x, dict)]
+    return []
 
 def extract_latest_market_price(tcggo_response: Dict[str, Any]) -> Optional[float]:
     """

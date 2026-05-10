@@ -55,30 +55,51 @@ async function mergePackCostHistoryFromPackPricingTable(sets) {
 async function fetchPokemonSetsFromSupabase() {
     // One request for all rows + embedded cards can exceed Postgres `statement_timeout` (HTTP 500 / code 57014).
     // Page by set rows; order is stable for offset pagination.
-    const select =
-        '*,pokemon_cards(unique_card_id,set_code,name,number,rarity,market_price,artist,image_url,metrics)';
+    const baseCardCols =
+        'unique_card_id,set_code,name,number,rarity,market_price,artist,image_url,metrics,tracked_priority';
+    const selectTracked = `*,pokemon_cards(${baseCardCols})&pokemon_cards.order=tracked_priority.asc&pokemon_cards.tracked_priority=gte.1`;
+    const selectLegacy = `*,pokemon_cards(${baseCardCols})`;
     const pageSize = 25;
     const headers = _supabaseRestHeaders();
-    const data = [];
-    for (let offset = 0; ; offset += pageSize) {
-        const url = `${SUPABASE_URL}/rest/v1/pokemon_sets?select=${encodeURIComponent(
-            select
-        )}&order=set_code.asc&limit=${pageSize}&offset=${offset}`;
-        const response = await fetch(url, { headers });
-        if (!response.ok) {
-            let detail = '';
-            try {
-                const errBody = await response.json();
-                if (errBody && errBody.message) detail = `: ${errBody.message}`;
-            } catch (e) {
-                /* ignore */
+
+    async function fetchAllSetPages(select) {
+        const out = [];
+        for (let offset = 0; ; offset += pageSize) {
+            const url = `${SUPABASE_URL}/rest/v1/pokemon_sets?select=${encodeURIComponent(
+                select,
+            )}&order=set_code.asc&limit=${pageSize}&offset=${offset}`;
+            const response = await fetch(url, { headers });
+            if (!response.ok) {
+                let detail = '';
+                try {
+                    const errBody = await response.json();
+                    if (errBody && errBody.message) detail = `: ${errBody.message}`;
+                } catch (e) {
+                    /* ignore */
+                }
+                throw new Error(`Supabase fetch failed: ${response.status}${detail}`);
             }
-            throw new Error(`Supabase fetch failed: ${response.status}${detail}`);
+            const batch = await response.json();
+            if (!Array.isArray(batch) || batch.length === 0) break;
+            out.push(...batch);
+            if (batch.length < pageSize) break;
         }
-        const batch = await response.json();
-        if (!Array.isArray(batch) || batch.length === 0) break;
-        data.push(...batch);
-        if (batch.length < pageSize) break;
+        return out;
+    }
+
+    let data;
+    try {
+        data = await fetchAllSetPages(selectTracked);
+    } catch (e) {
+        console.warn('tracked pokemon_cards embed failed (column missing or filter unsupported); using legacy fetch.', e);
+        data = await fetchAllSetPages(selectLegacy);
+    }
+    const nTracked = data.reduce(
+        (n, s) => n + (Array.isArray(s.pokemon_cards) ? s.pokemon_cards.length : 0),
+        0,
+    );
+    if (nTracked === 0) {
+        data = await fetchAllSetPages(selectLegacy);
     }
     
     // The frontend expects the JSON structure from `pokemon_sets_data.json`.
@@ -195,4 +216,22 @@ async function fetchPredictorAnalyticsAssetsFromSupabase() {
         if (row && row.asset_key != null) out[String(row.asset_key)] = row.payload;
     });
     return Object.keys(out).length ? out : null;
+}
+
+/**
+ * Per-card predictor payload from ``predictor_card_precompute`` (written by GitHub Actions).
+ * @param {string} uniqueCardId
+ * @returns {Promise<Record<string, unknown>|null>}
+ */
+async function fetchPredictorCardPrecomputeFromSupabase(uniqueCardId) {
+    if (!uniqueCardId || typeof SUPABASE_URL === 'undefined' || !SUPABASE_URL) return null;
+    const url = `${SUPABASE_URL}/rest/v1/predictor_card_precompute?unique_card_id=eq.${encodeURIComponent(
+        String(uniqueCardId),
+    )}&select=payload`;
+    const r = await fetch(url, { headers: _supabaseRestHeaders() });
+    if (!r.ok) return null;
+    const rows = await r.json();
+    if (!Array.isArray(rows) || rows.length === 0) return null;
+    const p = rows[0] && rows[0].payload;
+    return p && typeof p === 'object' ? p : null;
 }

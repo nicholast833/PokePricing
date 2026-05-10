@@ -1,6 +1,7 @@
 import os
 import datetime
 import logging
+from statistics import median
 from supabase import create_client, Client
 from dotenv import load_dotenv
 
@@ -35,7 +36,8 @@ logging.basicConfig(
     ]
 )
 
-BATCH_SIZE = 800  # 2 TCGGO calls + 1 eBay call per card = ~2400 TCGGO calls at 800 cards
+# TCGGO history uses up to 3 paginated GETs per card (~90d) + 1 eBay sold + 1 Browse; keep batch smaller vs 800.
+BATCH_SIZE = 270
 
 def run_queue():
     logging.info("==========================================")
@@ -84,7 +86,8 @@ def run_queue():
         name = card['name']
         set_code = card['set_code']
         metrics = card.get('metrics') or {}
-        price_history = card.get('price_history') or {}
+        ph_src = card.get('price_history')
+        price_history = dict(ph_src) if isinstance(ph_src, dict) else {}
         last_sync = card['last_synced_at'] or "NEVER"
         
         logging.info(f"[{index+1}/{len(cards)}] Processing: {name} ({set_code}) (Last sync: {last_sync})")
@@ -98,14 +101,26 @@ def run_queue():
             if tcggo_id and tcgpro_key:
                 logging.info(f"  -> Fetching TCGGO history for tcggo_id={tcggo_id}")
                 try:
-                    tcg_data = fetch_tcggo_price_history(tcggo_id, tcgpro_key, days=730)
+                    hist_days = max(7, int(os.environ.get("TCGGO_HISTORY_DAYS", "90")))
+                    tcg_data = fetch_tcggo_price_history(tcggo_id, tcgpro_key, days=hist_days)
                     
                     # Save full history
                     full_history = extract_full_price_history(tcg_data)
                     if full_history:
+                        max_keep = max(31, int(os.environ.get("TCGGO_STORE_MAX_POINTS", "120")))
+                        if len(full_history) > max_keep:
+                            full_history = full_history[-max_keep:]
                         price_history['tcggo_market_history'] = full_history
                         updates_made = True
-                        logging.info(f"  -> TCGGO: {len(full_history)} price data points saved")
+                        pages_meta = (tcg_data or {}).get("_tcggo_pages_fetched")
+                        merged_n = (tcg_data or {}).get("_tcggo_points_merged")
+                        extra = ""
+                        if pages_meta is not None:
+                            extra = f" (pages={pages_meta}"
+                            if merged_n is not None:
+                                extra += f", merged_keys={merged_n}"
+                            extra += ")"
+                        logging.info(f"  -> TCGGO: {len(full_history)} price data points saved{extra}")
                     
                     # Extract latest market price for quick reference
                     latest_market = extract_latest_market_price(tcg_data)
@@ -162,6 +177,35 @@ def run_queue():
                         metrics["ebay_active_sync_iso"] = today_iso
                         metrics["ebay_active_source"] = "buy_browse"
                         updates_made = True
+                        snaps = metrics.get("ebay_active_snapshots") or []
+                        prices_bn = []
+                        for s in snaps:
+                            if not isinstance(s, dict):
+                                continue
+                            pv = s.get("price_value")
+                            try:
+                                v = float(pv)
+                            except (TypeError, ValueError):
+                                continue
+                            if v > 0:
+                                prices_bn.append(v)
+                        if prices_bn:
+                            d_key = today_iso[:10]
+                            hist = list(price_history.get("ebay_active_price_history") or [])
+                            hist = [x for x in hist if not (isinstance(x, dict) and str(x.get("date") or "")[:10] == d_key)]
+                            hist.append(
+                                {
+                                    "date": d_key,
+                                    "median_usd": float(median(prices_bn)),
+                                    "low_usd": float(min(prices_bn)),
+                                    "high_usd": float(max(prices_bn)),
+                                    "n": len(prices_bn),
+                                }
+                            )
+                            hist.sort(key=lambda r: str(r.get("date") or ""))
+                            keep = max(31, int(os.environ.get("EBAY_ACTIVE_PRICE_HISTORY_MAX", "400")))
+                            hist = hist[-keep:]
+                            price_history["ebay_active_price_history"] = hist
                     else:
                         logging.warning(
                             f"  -> eBay Browse: HTTP {st} total={tot!r} err={str(snap.get('raw_error'))[:200]!r}"
@@ -199,5 +243,5 @@ def run_queue():
     logging.info("==========================================")
 
 if __name__ == '__main__':
-    BATCH_SIZE = 1150 
+    BATCH_SIZE = 380
     run_queue()

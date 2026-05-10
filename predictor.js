@@ -3,6 +3,10 @@
  */
 
 document.addEventListener('DOMContentLoaded', () => {
+    /** Must match ``ENGINE_V`` in ``github_actions/precompute_predictor_from_supabase.py``. */
+    const PREDICTOR_ENGINE_V = 1;
+    let engineSnapshotActive = false;
+
     const loadingEl = document.getElementById('loading');
     const containerEl = document.getElementById('predictor-container');
     const searchInput = document.getElementById('predictorSearch');
@@ -71,22 +75,39 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (name && Number.isFinite(med) && med > 0) analyticsState.artistChaseLookup[name] = med;
             });
 
-            // 1. Build Search Index & Training Rows
+            const snap =
+                fromDb != null && typeof fromDb === 'object' ? fromDb.predictor_engine_snapshot : null;
+            const snapOk =
+                snap &&
+                snap.v === PREDICTOR_ENGINE_V &&
+                snap.global_model &&
+                snap.global_regression &&
+                Array.isArray(snap.global_model.keys);
+
+            // 1. Build search index; optionally skip on-device LSRL fit when Actions snapshot exists.
             const trainingRows = [];
-            allSetsData.forEach(set => {
+            allSetsData.forEach((set) => {
                 if (!set.top_25_cards) return;
-                set.top_25_cards.forEach(card => {
-                    const price = SHARED_UTILS.resolveExplorerChartUsd(card);
-                    if (price && price > 0) {
-                        const feat = REGRESSION_ENGINE.extractFeatures(card, set, analyticsState);
-                        trainingRows.push({ card, set, feat, price });
+                set.top_25_cards.forEach((card) => {
+                    if (!snapOk) {
+                        const price = SHARED_UTILS.resolveExplorerChartUsd(card);
+                        if (price && price > 0) {
+                            const feat = REGRESSION_ENGINE.extractFeatures(card, set, analyticsState);
+                            trainingRows.push({ card, set, feat, price });
+                        }
                     }
                     globalSearchIndex.push({ card, set });
                 });
             });
 
-            // 2. Build Global Model
-            buildGlobalModel(trainingRows);
+            if (snapOk) {
+                globalModel = snap.global_model;
+                globalRegression = snap.global_regression;
+                engineSnapshotActive = true;
+            } else {
+                buildGlobalModel(trainingRows);
+                engineSnapshotActive = false;
+            }
             if (pg) pg.setDeterminate(0.92);
 
             loadingEl.style.display = 'none';
@@ -239,18 +260,54 @@ document.addEventListener('DOMContentLoaded', () => {
     async function runPrediction(card, set) {
         predictionView.style.display = 'block';
         destroyPredictorCharts();
-        
+
         const feat = REGRESSION_ENGINE.extractFeatures(card, set, analyticsState);
-        const compX = REGRESSION_ENGINE.compositeScoreFromRow(feat, globalModel);
         const actualPrice = SHARED_UTILS.resolveExplorerChartUsd(card);
-        
+
+        let compX = REGRESSION_ENGINE.compositeScoreFromRow(feat, globalModel);
         let rawModelUsd = 0;
         if (compX != null && globalRegression) {
             const logP = globalRegression.b0 + globalRegression.b1 * compX;
             rawModelUsd = Math.pow(10, logP);
         }
-        const cal = SHARED_UTILS.predictorCalibrateUsd(card, rawModelUsd);
-        const predictedPrice = cal.final;
+        let cal = SHARED_UTILS.predictorCalibrateUsd(card, rawModelUsd);
+        let predictedPrice = cal.final;
+
+        if (
+            engineSnapshotActive &&
+            card.unique_card_id &&
+            typeof fetchPredictorCardPrecomputeFromSupabase === 'function'
+        ) {
+            try {
+                const pre = await fetchPredictorCardPrecomputeFromSupabase(card.unique_card_id);
+                if (
+                    pre &&
+                    pre.engine_v === PREDICTOR_ENGINE_V &&
+                    Number.isFinite(Number(pre.predicted_final_usd))
+                ) {
+                    predictedPrice = Number(pre.predicted_final_usd);
+                    if (Number.isFinite(Number(pre.predicted_raw_usd))) {
+                        rawModelUsd = Number(pre.predicted_raw_usd);
+                    }
+                    if (pre.cal && typeof pre.cal === 'object') {
+                        cal = {
+                            final: Number(pre.cal.final) || predictedPrice,
+                            raw: pre.cal.raw != null ? Number(pre.cal.raw) : rawModelUsd,
+                            blended: Boolean(pre.cal.blended),
+                            anchor: pre.cal.anchor != null ? Number(pre.cal.anchor) : cal.anchor,
+                            t: pre.cal.t != null ? Number(pre.cal.t) : cal.t,
+                        };
+                    } else {
+                        cal = SHARED_UTILS.predictorCalibrateUsd(card, rawModelUsd);
+                    }
+                    if (pre.composite_x != null && Number.isFinite(Number(pre.composite_x))) {
+                        compX = Number(pre.composite_x);
+                    }
+                }
+            } catch (e) {
+                console.warn('predictor_card_precompute:', e);
+            }
+        }
 
         renderScorecard(card, set, predictedPrice, actualPrice, feat, cal);
         renderCardHero(card, set);

@@ -490,6 +490,13 @@ const SHARED_UTILS = {
             if (dk.length >= 10) allLabelsSet.add(dk);
         });
 
+        const ebListHistPre = Array.isArray(card.ebay_active_price_history) ? card.ebay_active_price_history : [];
+        ebListHistPre.forEach((r) => {
+            if (!r || typeof r !== 'object') return;
+            const dk = String(r.date || '').trim().slice(0, 10);
+            if (dk.length >= 10) allLabelsSet.add(dk);
+        });
+
         let labels = Array.from(allLabelsSet).filter(Boolean).sort();
         if (labels.length < 2) return null;
 
@@ -628,16 +635,39 @@ const SHARED_UTILS = {
             labels = Array.from(allLabelsSet).filter(Boolean).sort();
 
             if (apiMap.size > 0) {
+                const rawTcg = labels.map((l) => apiMap.get(l) ?? null);
                 datasets.push({
                     type: 'line',
                     label: 'TCG Pro · TCGPlayer Market (USD)',
-                    data: labels.map((l) => apiMap.get(l) ?? null),
+                    data: rawTcg,
                     borderColor: '#f97316',
                     backgroundColor: 'rgba(249,115,22,0.1)',
                     fill: false,
                     tension: 0.25,
                     spanGaps: true,
                 });
+                const filled = SHARED_UTILS._linearInfillArray(rawTcg);
+                const gapOnly = rawTcg.map((v, i) => (
+                    (v == null || !Number.isFinite(Number(v))) && filled[i] != null && Number.isFinite(filled[i])
+                        ? filled[i]
+                        : null
+                ));
+                if (gapOnly.some((x) => x != null)) {
+                    datasets.push({
+                        type: 'line',
+                        label: 'TCGGO · TCGPlayer (gap connect)',
+                        data: gapOnly,
+                        borderColor: 'rgba(249,115,22,0.55)',
+                        backgroundColor: 'transparent',
+                        fill: false,
+                        tension: 0.2,
+                        spanGaps: false,
+                        borderDash: [7, 5],
+                        pointRadius: 0,
+                        borderWidth: 1.5,
+                        order: 2,
+                    });
+                }
             }
             if (cmMap.size > 0) {
                 datasets.push({
@@ -680,6 +710,34 @@ const SHARED_UTILS = {
             });
         }
 
+        const ebListHist = Array.isArray(card.ebay_active_price_history) ? card.ebay_active_price_history : [];
+        const ebActMap = new Map();
+        ebListHist.forEach((r) => {
+            if (!r || typeof r !== 'object') return;
+            const dk = String(r.date || '').trim().slice(0, 10);
+            const v = Number(r.median_usd);
+            if (dk.length >= 10 && Number.isFinite(v) && v > 0) ebActMap.set(dk, v);
+        });
+        if (ebActMap.size) {
+            const actPts = labels.map((l) => (ebActMap.has(l) ? ebActMap.get(l) : null));
+            if (actPts.some((x) => x != null)) {
+                datasets.push({
+                    type: 'line',
+                    label: 'eBay active (median ask snapshot)',
+                    data: actPts,
+                    borderColor: '#38bdf8',
+                    backgroundColor: 'rgba(56,189,248,0.08)',
+                    borderDash: [5, 4],
+                    fill: false,
+                    tension: 0.2,
+                    spanGaps: true,
+                    pointRadius: 2,
+                    yAxisID: 'y',
+                    order: 4,
+                });
+            }
+        }
+
         const soldRows = SHARED_UTILS.ebaySoldRowsDeduped(card);
         if (soldRows.length) {
             const dayKey = (r) => SHARED_UTILS.normalizeEbaySoldDateKey(r.date) || String(r.date || '').trim().slice(0, 10);
@@ -714,6 +772,31 @@ const SHARED_UTILS = {
             const hasUg = ugMed.some((v) => v != null);
             const hasGr = grMed.some((v) => v != null);
             const hasVol = volCt.some((v) => v != null && v > 0);
+            const poolMed = labels.map((l) => {
+                const b = byDay.get(l);
+                if (!b) return null;
+                const all = [...b.ug, ...b.gr];
+                if (!all.length) return null;
+                return SHARED_UTILS._medianSortedNums(all);
+            });
+            const hasPool = poolMed.some((v) => v != null);
+            if (hasUg && hasGr && hasPool) {
+                datasets.push({
+                    type: 'line',
+                    label: 'eBay sold median (combined)',
+                    data: poolMed,
+                    borderColor: '#fbbf24',
+                    backgroundColor: 'rgba(251,191,36,0.06)',
+                    fill: false,
+                    tension: 0.22,
+                    spanGaps: true,
+                    borderDash: [3, 3],
+                    borderWidth: 2,
+                    pointRadius: 0,
+                    yAxisID: 'y',
+                    order: 3,
+                });
+            }
             if (hasUg) {
                 datasets.push({
                     type: 'line',
@@ -1112,6 +1195,30 @@ const SHARED_UTILS = {
         const t = Date.parse(s);
         if (Number.isFinite(t)) return new Date(t).toISOString().slice(0, 10);
         return '';
+    },
+
+    /** Linear interpolation across interior nulls (for dashed “connect” TCGGO line only). */
+    _linearInfillArray(arr) {
+        if (!Array.isArray(arr) || !arr.length) return arr;
+        const out = arr.map((v) => (v != null && Number.isFinite(Number(v)) ? Number(v) : null));
+        const n = out.length;
+        for (let i = 0; i < n; i++) {
+            if (out[i] != null) continue;
+            let lo = i - 1;
+            while (lo >= 0 && out[lo] == null) lo -= 1;
+            let hi = i + 1;
+            while (hi < n && out[hi] == null) hi += 1;
+            if (lo < 0 || hi >= n) continue;
+            const vlo = out[lo];
+            const vhi = out[hi];
+            if (!Number.isFinite(vlo) || !Number.isFinite(vhi)) continue;
+            const span = hi - lo;
+            for (let k = lo + 1; k < hi; k++) {
+                const t = (k - lo) / span;
+                out[k] = vlo + (vhi - vlo) * t;
+            }
+        }
+        return out;
     },
 
     /** @param {number[]} arr */
@@ -1701,6 +1808,11 @@ const SHARED_UTILS = {
                 q = decodeURIComponent(u.searchParams.get('_nkw') || '').trim();
             } catch (e) { /* ignore */ }
             if (q) card.ebay_browse_query = q;
+        }
+
+        const phe = card.price_history;
+        if (phe && typeof phe === 'object' && Array.isArray(phe.ebay_active_price_history) && !Array.isArray(card.ebay_active_price_history)) {
+            card.ebay_active_price_history = phe.ebay_active_price_history;
         }
     },
 
@@ -2438,7 +2550,7 @@ const SHARED_UTILS = {
                 <details class="card-detail-unified-help">
                     <summary class="card-detail-unified-help__summary">Line &amp; series descriptions</summary>
                     <div class="card-detail-unified-help__body">
-                        <p class="card-detail-unified-help__p">Orange: TCGGO TCGPlayer (USD). Pink dashed: Cardmarket EU low at <strong>×${fx}</strong> EUR→USD. Purple: Pokémon Wizard. Soft pink / peach lines: median <strong>sold</strong> USD (ungraded vs graded). Green bars (right axis): <strong>sold listing count per day</strong> — same calendar axis as the price lines so you can read velocity next to level.</p>
+                        <p class="card-detail-unified-help__p">Orange: TCGGO TCGPlayer (USD); lighter dashed orange: linear <strong>gap connect</strong> only where TCGGO has missing days between known points (not a forecast). Pink dashed: Cardmarket EU low at <strong>×${fx}</strong> EUR→USD. Purple: Pokémon Wizard. Cyan dashed: <strong>eBay active</strong> median ask from daily Browse snapshots (needs several sync days). Soft pink / peach: sold medians (ungraded / graded); amber dash: <strong>combined</strong> sold median when both grades exist. Green bars (right axis): sold count per day on the same date axis.</p>
                         ${noteTech}
                     </div>
                 </details>`;
@@ -2804,37 +2916,11 @@ const SHARED_UTILS = {
             );
         }
         if (card.pokemon_wizard_url) {
-            const wcur = card.pokemon_wizard_current_price_usd != null && Number.isFinite(Number(card.pokemon_wizard_current_price_usd))
-                ? fmt(card.pokemon_wizard_current_price_usd) : '—';
-            const wt = card.pokemon_wizard_current_trend_pct != null && Number.isFinite(Number(card.pokemon_wizard_current_trend_pct))
-                ? `${Number(card.pokemon_wizard_current_trend_pct).toFixed(2)}%` : '—';
-            const w7 = card.pokemon_wizard_last_7d_pct != null && Number.isFinite(Number(card.pokemon_wizard_last_7d_pct))
-                ? `${Number(card.pokemon_wizard_last_7d_pct).toFixed(2)}%` : '—';
-            const w30 = card.pokemon_wizard_last_30d_pct != null && Number.isFinite(Number(card.pokemon_wizard_last_30d_pct))
-                ? `${Number(card.pokemon_wizard_last_30d_pct).toFixed(2)}%` : '—';
-            const wy = card.pokemon_wizard_ytd_pct != null && Number.isFinite(Number(card.pokemon_wizard_ytd_pct))
-                ? `${Number(card.pokemon_wizard_ytd_pct).toFixed(2)}%` : '—';
-            let histRows = '';
-            const ph = SHARED_UTILS.filterWizardPriceHistoryRows(card.pokemon_wizard_price_history || []);
-            ph.forEach((row) => {
-                const pr = row.price_usd != null && Number.isFinite(Number(row.price_usd)) ? fmt(row.price_usd) : '—';
-                const tr = row.trend != null ? esc(String(row.trend)) : '—';
-                histRows += `<tr><td>${esc(String(row.label || row.sort_key || ''))}</td><td>${pr}</td><td>${tr}</td></tr>`;
-            });
-            const histTable = histRows
-                ? `<div class="card-detail-table-scroll"><table class="card-detail-mini-table"><thead><tr><th>When</th><th>Price</th><th>Trend</th></tr></thead><tbody>${histRows}</tbody></table></div>`
-                : '';
             wizardBlock = `
             <div class="card-detail-section">
-                <h4>Pokémon Wizard <span style="font-weight:400;color:#94a3b8;">(TCGPlayer retail proxy)</span></h4>
-                <p class="card-detail-sub" style="margin-bottom:0.75rem;"><a class="card-detail-link" href="${SHARED_UTILS.escAttr(String(card.pokemon_wizard_url))}" target="_blank" rel="noopener noreferrer">Open on Pokémon Wizard</a></p>
-                <div class="card-detail-stat-grid">
-                    <div class="card-detail-stat"><span class="lbl">Current</span><span class="val">${wcur} <span style="color:#94a3b8;">(${esc(wt)} trend)</span></span></div>
-                    <div class="card-detail-stat"><span class="lbl">Last 7d</span><span class="val">${esc(w7)}</span></div>
-                    <div class="card-detail-stat"><span class="lbl">Last 30d</span><span class="val">${esc(w30)}</span></div>
-                    <div class="card-detail-stat"><span class="lbl">YTD</span><span class="val">${esc(wy)}</span></div>
-                </div>
-                ${histTable}
+                <h4>Pokémon Wizard</h4>
+                <p class="card-detail-sub" style="margin:0;">Retail history through <strong>1Y</strong> (and other windows) is shown in the unified <strong>Price history · USD</strong> chart. Open the live Wizard page for card-specific notes.</p>
+                <p class="card-detail-sub" style="margin-top:0.5rem;"><a class="card-detail-link" href="${SHARED_UTILS.escAttr(String(card.pokemon_wizard_url))}" target="_blank" rel="noopener noreferrer">Open on Pokémon Wizard</a></p>
             </div>`;
         }
 

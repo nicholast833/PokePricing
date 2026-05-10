@@ -1187,7 +1187,7 @@ def main() -> int:
     if key:
         print("[tcggo] loading /episodes index ...", flush=True)
         try:
-            ep_rows = fetch_all_episodes(key, sleep_s=max(0.0, float(args.sleep)))
+            ep_rows, _ = fetch_all_episodes(key, sleep_s=max(0.0, float(args.sleep)))
             idx = _episode_index_from_rows(ep_rows)
             idx[_norm_str("Wizards Black Star Promos")] = idx.get(_norm_str("Wizards Black Star Promos"), 125)
             idx[_norm_str("Nintendo Black Star Promos")] = idx.get(_norm_str("Nintendo Black Star Promos"), 113)
