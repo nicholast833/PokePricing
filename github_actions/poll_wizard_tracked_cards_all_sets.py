@@ -3,8 +3,9 @@
 Refresh Pokémon Wizard chart price history for every set's top_25_cards in pokemon_sets_data.json.
 
 Runs scrape/sync_pokemon_wizard.py in full mode (not --only-missing-price-history), so each tracked
-card's Wizard card page is re-fetched and pokemon_wizard_price_history is replaced with the latest
-chart series (1Y window: last 365 days to latest point), including market / low / mid / high / trend %.
+card's Wizard card page is re-fetched and ``pokemon_wizard_price_history`` is **merged** with the
+latest chart/table rows (newer scrape wins on duplicate dates) so long-running schedules accumulate
+history beyond a single 1Y chart window where rows overlap.
 
 Designed for GitHub Actions; no API secrets required (public Wizard HTML + TCGPlayer mp-search-api).
 """

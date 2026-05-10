@@ -81,6 +81,7 @@ def run_queue():
     # 2. Process each card
     from tcggo_api_fetcher import fetch_tcggo_price_history, extract_latest_market_price, extract_full_price_history, fetch_tcggo_ebay_sold
     from ebay_api_fetcher import build_ebay_active_search_query, fetch_ebay_active_listing_snapshot
+    from price_history_merge import append_ebay_anonymous_cohort_daily, merge_tcggo_market_history_by_date
 
     # Check multiple possible environment variable names for the API key
     tcgpro_key = os.environ.get("TCGPRO_API_KEY") or os.environ.get("RAPIDAPI_KEY_TCGGO") or os.environ.get("RAPIDAPI_KEY")
@@ -116,10 +117,11 @@ def run_queue():
                     # Save full history
                     full_history = extract_full_price_history(tcg_data)
                     if full_history:
-                        max_keep = max(31, int(os.environ.get("TCGGO_STORE_MAX_POINTS", "120")))
-                        if len(full_history) > max_keep:
-                            full_history = full_history[-max_keep:]
-                        price_history['tcggo_market_history'] = full_history
+                        merged_hist = merge_tcggo_market_history_by_date(
+                            price_history.get("tcggo_market_history"),
+                            full_history,
+                        )
+                        price_history["tcggo_market_history"] = merged_hist
                         updates_made = True
                         pages_meta = (tcg_data or {}).get("_tcggo_pages_fetched")
                         merged_n = (tcg_data or {}).get("_tcggo_points_merged")
@@ -129,7 +131,7 @@ def run_queue():
                             if merged_n is not None:
                                 extra += f", merged_keys={merged_n}"
                             extra += ")"
-                        logging.info(f"  -> TCGGO: {len(full_history)} price data points saved{extra}")
+                        logging.info(f"  -> TCGGO: merged to {len(merged_hist)} price points (daily append){extra}")
                     
                     # Extract latest market price for quick reference
                     latest_market = extract_latest_market_price(tcg_data)
@@ -189,6 +191,12 @@ def run_queue():
                         metrics["ebay_active_source"] = "buy_browse"
                         updates_made = True
                         snaps = metrics.get("ebay_active_snapshots") or []
+                        append_ebay_anonymous_cohort_daily(
+                            price_history,
+                            today_d=today_iso[:10],
+                            total_api=tot,
+                            cohort=snap.get("anonymous_cohort") or [],
+                        )
                         prices_bn = []
                         for s in snaps:
                             if not isinstance(s, dict):

@@ -5,11 +5,16 @@ results for new keys, GitHub Actions IPs, or policy limits. **Buy Browse** canno
 items — only **active** listings (OAuth: ``EBAY_APP_ID`` + ``EBAY_CERT_ID``).
 
 ``run_daily_api_queue`` uses **Buy Browse** via ``fetch_ebay_active_listing_snapshot`` (hit
-``total`` plus a few listing snippets for the UI).
+``total`` plus a few **price-only** listing rows for the UI; item ids/titles/URLs are not stored).
+
+``anonymous_cohort`` holds SHA-256(itemId + salt) plus rounded USD for day-over-day “listing
+ended” heuristics without persisting eBay listing identifiers.
 """
 
 import base64
+import hashlib
 import json
+import math
 import os
 import re
 import time
@@ -275,28 +280,61 @@ def invalidate_browse_oauth_cache() -> None:
     _OAUTH_CACHE["exp_mono"] = 0.0
 
 
-def _browse_snippet(hit: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    if not isinstance(hit, dict):
-        return None
-    out: Dict[str, Any] = {}
-    title = hit.get("title")
-    if title:
-        out["title"] = str(title)[:240]
-    url = hit.get("itemWebUrl")
-    if url:
-        out["url"] = str(url)
-    price = hit.get("price") if isinstance(hit.get("price"), dict) else {}
-    val = price.get("value")
-    if val is not None:
+def ebay_listing_hash_salt(app_id: str, cert_id: str) -> str:
+    custom = (os.environ.get("EBAY_LISTING_HASH_SALT") or "").strip()
+    if custom:
+        return custom
+    return hashlib.sha256(f"{app_id}|{cert_id}|ebay_anon_v1".encode("utf-8")).hexdigest()
+
+
+def ebay_redacted_active_snapshots(item_summaries: List[Dict[str, Any]], limit: int) -> List[Dict[str, Any]]:
+    """Buy Browse item summaries reduced to non-identifying price fields only."""
+    out: List[Dict[str, Any]] = []
+    lim = max(1, min(int(limit), 50))
+    for raw in item_summaries[:lim]:
+        if not isinstance(raw, dict):
+            continue
+        price = raw.get("price") if isinstance(raw.get("price"), dict) else {}
+        val = price.get("value")
+        cur = price.get("currency")
+        sn: Dict[str, Any] = {}
+        if val is not None:
+            try:
+                sn["price_value"] = float(val)
+            except (TypeError, ValueError):
+                sn["price_value"] = val
+        if cur:
+            sn["price_currency"] = str(cur)
+        if sn:
+            out.append(sn)
+    return out
+
+
+def ebay_anonymous_listing_cohort(
+    item_summaries: List[Dict[str, Any]],
+    *,
+    salt: str,
+    limit: int,
+) -> List[Dict[str, Any]]:
+    """SHA-256(itemId + salt) per sampled listing + rounded BIN price (no titles or URLs)."""
+    out: List[Dict[str, Any]] = []
+    lim = max(1, min(int(limit), 50))
+    for raw in item_summaries[:lim]:
+        if not isinstance(raw, dict):
+            continue
+        iid = raw.get("itemId") or raw.get("item_id")
+        if not iid:
+            continue
+        price = raw.get("price") if isinstance(raw.get("price"), dict) else {}
+        val = price.get("value")
         try:
-            out["price_value"] = float(val)
+            pv = float(val)
         except (TypeError, ValueError):
-            out["price_value"] = val
-    cur = price.get("currency")
-    if cur:
-        out["price_currency"] = str(cur)
-    if not out.get("title") and not out.get("url"):
-        return None
+            continue
+        if not (math.isfinite(pv) and pv > 0):
+            continue
+        sig = hashlib.sha256(f"{salt}|{iid}".encode("utf-8")).hexdigest()
+        out.append({"sig": sig, "bin_usd": round(pv, 2)})
     return out
 
 
@@ -311,9 +349,8 @@ def fetch_ebay_active_listing_snapshot(
     """
     **Buy Browse API** — active listings only (eBay does not expose completed sales here).
 
-    Returns total hit count (``total`` from API) and up to ``limit`` compact listing rows
-    for UI snapshots. Use this in CI instead of Finding ``findCompletedItems``, which is
-    legacy and often returns empty for new keys / datacenter IPs.
+    Returns ``total`` from the API, **price-only** ``snapshots`` (no titles or listing URLs),
+    and ``anonymous_cohort`` (hashed listing ids + rounded prices) for longitudinal storage.
     """
     mp = (marketplace_id or os.environ.get("EBAY_MARKETPLACE_ID") or "EBAY_US").strip()
     token = _get_browse_oauth_token(app_id, cert_id)
@@ -349,6 +386,7 @@ def fetch_ebay_active_listing_snapshot(
         "search_url": "https://www.ebay.com/sch/i.html?" + urllib.parse.urlencode({"_nkw": keywords[:350]}),
         "total": None,
         "snapshots": [],
+        "anonymous_cohort": [],
         "raw_error": None,
     }
     try:
@@ -369,12 +407,10 @@ def fetch_ebay_active_listing_snapshot(
             out["total"] = tot
 
     summaries = data.get("itemSummaries") if isinstance(data.get("itemSummaries"), list) else []
-    snaps: List[Dict[str, Any]] = []
-    for raw in summaries[: max(1, min(int(limit), 50))]:
-        sn = _browse_snippet(raw) if isinstance(raw, dict) else None
-        if sn:
-            snaps.append(sn)
-    out["snapshots"] = snaps
+    lim = max(1, min(int(limit), 50))
+    salt = ebay_listing_hash_salt(app_id, cert_id)
+    out["snapshots"] = ebay_redacted_active_snapshots(summaries, lim)
+    out["anonymous_cohort"] = ebay_anonymous_listing_cohort(summaries, salt=salt, limit=lim)
     return out
 
 

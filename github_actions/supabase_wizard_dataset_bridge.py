@@ -43,6 +43,8 @@ except ImportError:
 
 from supabase import Client, create_client
 
+from price_history_merge import merge_wizard_price_history_rows
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -209,7 +211,10 @@ def apply_wizard_from_json(input_path: Path, *, batch_size: int = 80) -> None:
             new_ph = dict(old_ph)
             hist = patch.get("pokemon_wizard_price_history")
             if hist is not None:
-                new_ph["pokemon_wizard_price_history"] = hist
+                new_ph["pokemon_wizard_price_history"] = merge_wizard_price_history_rows(
+                    old_ph.get("pokemon_wizard_price_history"),
+                    hist,
+                )
             try:
                 client.table("pokemon_cards").update(
                     {"metrics": new_m, "price_history": new_ph, "last_synced_at": now}

@@ -1904,6 +1904,14 @@ const SHARED_UTILS = {
         if (phe && typeof phe === 'object' && Array.isArray(phe.ebay_active_price_history) && !Array.isArray(card.ebay_active_price_history)) {
             card.ebay_active_price_history = phe.ebay_active_price_history;
         }
+        if (
+            phe
+            && typeof phe === 'object'
+            && Array.isArray(phe.ebay_active_anonymous_cohort_history)
+            && !Array.isArray(card.ebay_active_anonymous_cohort_history)
+        ) {
+            card.ebay_active_anonymous_cohort_history = phe.ebay_active_anonymous_cohort_history;
+        }
     },
 
     /** Thumbnail for an eBay Browse snippet (when sync stored `image_url`), else card art. */
@@ -3133,7 +3141,7 @@ const SHARED_UTILS = {
                     <span class="card-detail-section__ebay-title">Live eBay listings</span>
                     ${viewAllLink}
                 </h4>
-                <p class="card-detail-section__ebay-lead">Thumbnails when the Browse sync stored them; prices vs your <strong>blended chart median</strong> (same basis as the scorecard).</p>
+                <p class="card-detail-section__ebay-lead">Daily sync may store <strong>price-only</strong> active rows (no listing titles or URLs). Thumbnails use card art when the API image is not kept; prices vs your <strong>blended chart median</strong> (same basis as the scorecard).</p>
                 ${kpiRow ? `<div class="card-detail-ebay-kpi-wrap">${kpiRow}</div>` : ''}
                 ${listingCards.length ? `
                 <div class="card-detail-ebay-listings-scroll ptcg-ebay-listings-scroll" role="list" aria-label="eBay listings and recent sold samples">
@@ -3147,7 +3155,7 @@ const SHARED_UTILS = {
                     </div>` : ''}
                 <details class="card-detail-ebay-footnote">
                     <summary>How this block relates to the price chart</summary>
-                    <p>Rows here are <strong>active</strong> Buy It Now snapshots from eBay search (not sold comps). Median <strong>sold</strong> paths and <strong>per-day sold counts</strong> share the unified <strong>Price history</strong> chart (green bars on the right axis when that data exists). Search: <code class="card-detail-ebay-footnote__code">${esc(card.ebay_browse_query ? String(card.ebay_browse_query) : '—')}</code></p>
+                    <p>Rows here are <strong>active</strong> Buy It Now samples from eBay search (not sold comps). Longitudinal <strong>listing flow</strong> (ended vs new listing <strong>proxies</strong> from hashed ids) lives in <code class="card-detail-ebay-footnote__code">price_history.ebay_active_anonymous_cohort_history</code> on the card row. Median <strong>sold</strong> paths and <strong>per-day sold counts</strong> share the unified <strong>Price history</strong> chart (green bars on the right axis when that data exists). Search: <code class="card-detail-ebay-footnote__code">${esc(card.ebay_browse_query ? String(card.ebay_browse_query) : '—')}</code></p>
                 </details>
             </div>`;
         }

@@ -24,8 +24,9 @@ Data sources:
   GET https://mp-search-api.tcgplayer.com/v1/product/{id}/details
   GET https://www.pokemonwizard.com/cards/{id}/{slug}
 
-Price history: parses only the #pricehistory <tbody> rows (the table may paginate in the UI,
-but the HTML response typically includes all rows server-side).
+Price history: parses the #pricehistory <tbody> or chart series; each successful run **merges**
+new rows onto any existing ``pokemon_wizard_price_history`` (by date key) so long-running jobs
+accumulate coverage beyond a single scrape window where rows overlap.
 
 Each run appends a record to reports/pokemon_wizard_sync_skips.json (skipped cards with reason codes).
 Regenerate reports/gaps/sets_missing_wizard_price_history.txt to include those rows in the skip subsection.
@@ -82,6 +83,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from dataset_report_paths import WIZARD_SYNC_SKIPS_LOG, dataset_sidecar_report_path  # noqa: E402
 from json_atomic_util import write_json_atomic  # noqa: E402
 from tcgtracking_merge import norm_card_name  # noqa: E402
+from price_history_merge import merge_wizard_price_history_rows  # noqa: E402
 
 WIZ = "pokemon_wizard_"
 HEAD = {"User-Agent": "Mozilla/5.0 PokemonTCG-Explorer/sync_pokemon_wizard"}
@@ -1291,12 +1293,17 @@ def run(
                 print("  -> skip: Wizard page did not parse (empty or layout change)", flush=True)
                 continue
 
+            old_wizard_hist = c.get("pokemon_wizard_price_history") if isinstance(c.get("pokemon_wizard_price_history"), list) else []
             clear_wizard_fields(c)
             c[f"{WIZ}url"] = wurl
             if pname:
                 c[f"{WIZ}tcgplayer_product_url_name"] = pname
             for k, v in parsed.items():
-                if v is not None:
+                if v is None:
+                    continue
+                if k == "price_history" and isinstance(v, list):
+                    c[f"{WIZ}{k}"] = merge_wizard_price_history_rows(old_wizard_hist, v)
+                else:
                     c[f"{WIZ}{k}"] = v
             rep["cards_merged"] += 1
             print(
