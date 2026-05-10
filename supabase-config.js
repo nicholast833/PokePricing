@@ -51,80 +51,193 @@ async function mergePackCostHistoryFromPackPricingTable(sets) {
     });
 }
 
-// Helper function to fetch Sets and Cards from Supabase REST API (excluding heavy price history)
-async function fetchPokemonSetsFromSupabase() {
-    // One request for all rows + embedded cards can exceed Postgres `statement_timeout` (HTTP 500 / code 57014).
-    // Page by set rows; order is stable for offset pagination.
-    const baseCardCols =
-        'unique_card_id,set_code,name,number,rarity,market_price,artist,image_url,metrics,tracked_priority';
-    const selectTracked = `*,pokemon_cards(${baseCardCols})&pokemon_cards.order=tracked_priority.asc&pokemon_cards.tracked_priority=gte.1`;
-    const selectLegacy = `*,pokemon_cards(${baseCardCols})`;
-    const pageSize = 25;
-    const headers = _supabaseRestHeaders();
+const _EXPLORER_SLIM_CARD_COLS =
+    'unique_card_id,set_code,name,number,rarity,market_price,artist,image_url,tracked_priority';
+const _EXPLORER_FULL_CARD_COLS = `${_EXPLORER_SLIM_CARD_COLS},metrics`;
 
-    async function fetchAllSetPages(select) {
-        const out = [];
-        for (let offset = 0; ; offset += pageSize) {
-            const url = `${SUPABASE_URL}/rest/v1/pokemon_sets?select=${encodeURIComponent(
-                select,
-            )}&order=set_code.asc&limit=${pageSize}&offset=${offset}`;
-            const response = await fetch(url, { headers });
-            if (!response.ok) {
-                let detail = '';
-                try {
-                    const errBody = await response.json();
-                    if (errBody && errBody.message) detail = `: ${errBody.message}`;
-                } catch (e) {
-                    /* ignore */
-                }
-                throw new Error(`Supabase fetch failed: ${response.status}${detail}`);
-            }
-            const batch = await response.json();
-            if (!Array.isArray(batch) || batch.length === 0) break;
-            out.push(...batch);
-            if (batch.length < pageSize) break;
-        }
-        return out;
-    }
-
-    let data;
-    try {
-        data = await fetchAllSetPages(selectTracked);
-    } catch (e) {
-        console.warn('tracked pokemon_cards embed failed (column missing or filter unsupported); using legacy fetch.', e);
-        data = await fetchAllSetPages(selectLegacy);
-    }
-    const nTracked = data.reduce(
-        (n, s) => n + (Array.isArray(s.pokemon_cards) ? s.pokemon_cards.length : 0),
-        0,
-    );
-    if (nTracked === 0) {
-        data = await fetchAllSetPages(selectLegacy);
-    }
-    
-    // The frontend expects the JSON structure from `pokemon_sets_data.json`.
-    // We need to map `pokemon_cards` back to `top_25_cards`, and restore the flattened metrics.
-    const mergedRows = data.map((set) => {
-        // Map pokemon_cards -> top_25_cards
+/**
+ * @param {unknown[]} rawSets
+ * @param {{ mergeCardMetrics?: boolean }} [opts]
+ */
+function mapRawSetsToExplorerShape(rawSets, opts) {
+    const mergeCardMetrics = opts && opts.mergeCardMetrics !== false;
+    return (rawSets || []).map((set) => {
         const cards = set.pokemon_cards || [];
         const top_25_cards = cards.map((c) => {
-            const flat = {
-                ...c,
-                ...(c.metrics || {}),
-            };
+            const flat = mergeCardMetrics ? { ...c, ...(c.metrics || {}) } : { ...c };
             if (typeof SHARED_UTILS !== 'undefined' && SHARED_UTILS.deriveExplorerSpeciesKeyFromCardName) {
                 const sk = SHARED_UTILS.deriveExplorerSpeciesKeyFromCardName(flat.name);
                 if (sk) flat.species = sk;
             }
             return flat;
         });
-
         return {
             ...set,
             ...(set.metadata || {}),
             top_25_cards,
         };
     });
+}
+
+async function _fetchPokemonSetsPagedSelect(select, pageSize) {
+    const headers = _supabaseRestHeaders();
+    const out = [];
+    for (let offset = 0; ; offset += pageSize) {
+        const url = `${SUPABASE_URL}/rest/v1/pokemon_sets?select=${encodeURIComponent(
+            select,
+        )}&order=set_code.asc&limit=${pageSize}&offset=${offset}`;
+        const response = await fetch(url, { headers });
+        if (!response.ok) {
+            let detail = '';
+            try {
+                const errBody = await response.json();
+                if (errBody && errBody.message) detail = `: ${errBody.message}`;
+            } catch (e) {
+                /* ignore */
+            }
+            throw new Error(`Supabase fetch failed: ${response.status}${detail}`);
+        }
+        const batch = await response.json();
+        if (!Array.isArray(batch) || batch.length === 0) break;
+        out.push(...batch);
+        if (batch.length < pageSize) break;
+    }
+    return out;
+}
+
+/** Set metadata only (no embedded cards) — small pages for Explorer catalog + filters. */
+async function fetchPokemonSetsCatalogOnly() {
+    const pageSize = 60;
+    const raw = await _fetchPokemonSetsPagedSelect('*', pageSize);
+    const merged = mapRawSetsToExplorerShape(raw, { mergeCardMetrics: false });
+    merged.forEach((s) => {
+        s.top_25_cards = [];
+    });
+    try {
+        await mergePackCostHistoryFromPackPricingTable(merged);
+    } catch (e) {
+        console.warn('mergePackCostHistoryFromPackPricingTable skipped:', e);
+    }
+    merged.forEach((m) => {
+        if (typeof SHARED_UTILS !== 'undefined' && SHARED_UTILS.hydrateSetPackCostPipelineFields) {
+            SHARED_UTILS.hydrateSetPackCostPipelineFields(m);
+        }
+    });
+    return merged;
+}
+
+/**
+ * Fetch specific sets with embedded cards (slim or full). ``setCodes`` length should stay small (URL limits).
+ * @param {string[]} setCodes
+ * @param {{ withMetrics?: boolean }} [opts]
+ */
+async function fetchPokemonSetsCardSliceByCodes(setCodes, opts) {
+    const withMetrics = Boolean(opts && opts.withMetrics);
+    const cardCols = withMetrics ? _EXPLORER_FULL_CARD_COLS : _EXPLORER_SLIM_CARD_COLS;
+    const selectTracked = `*,pokemon_cards(${cardCols})&pokemon_cards.order=tracked_priority.asc&pokemon_cards.tracked_priority=gte.1`;
+    const selectLegacy = `*,pokemon_cards(${cardCols})`;
+    const clean = [...new Set((setCodes || []).map((c) => String(c || '').trim().toLowerCase()).filter(Boolean))];
+    if (!clean.length) return [];
+    const inList = clean.map((c) => encodeURIComponent(c)).join(',');
+    const headers = _supabaseRestHeaders();
+    const tryFetch = async (sel) => {
+        const url = `${SUPABASE_URL}/rest/v1/pokemon_sets?set_code=in.(${inList})&select=${encodeURIComponent(
+            sel,
+        )}&order=set_code.asc`;
+        const r = await fetch(url, { headers });
+        if (!r.ok) throw new Error(`Supabase fetch failed: ${r.status}`);
+        return r.json();
+    };
+    let data;
+    try {
+        data = await tryFetch(selectTracked);
+    } catch (e) {
+        console.warn('tracked card slice failed; legacy slice.', e);
+        data = await tryFetch(selectLegacy);
+    }
+    if (!Array.isArray(data)) return [];
+    const nTracked = data.reduce(
+        (n, s) => n + (Array.isArray(s.pokemon_cards) ? s.pokemon_cards.length : 0),
+        0,
+    );
+    if (nTracked === 0 && clean.length) {
+        data = await tryFetch(selectLegacy);
+    }
+    const merged = mapRawSetsToExplorerShape(data, { mergeCardMetrics: withMetrics });
+    try {
+        await mergePackCostHistoryFromPackPricingTable(merged);
+    } catch (e) {
+        console.warn('mergePackCostHistoryFromPackPricingTable skipped:', e);
+    }
+    merged.forEach((m) => {
+        if (typeof SHARED_UTILS !== 'undefined' && SHARED_UTILS.hydrateSetPackCostPipelineFields) {
+            SHARED_UTILS.hydrateSetPackCostPipelineFields(m);
+        }
+    });
+    return merged;
+}
+
+/** One set with full ``metrics`` merge (Explorer expand / deep link). */
+async function fetchPokemonSetWithMetricsByCode(setCode) {
+    const sc = String(setCode || '').trim().toLowerCase();
+    if (!sc) return null;
+    const selectTracked = `*,pokemon_cards(${_EXPLORER_FULL_CARD_COLS})&pokemon_cards.order=tracked_priority.asc&pokemon_cards.tracked_priority=gte.1`;
+    const selectLegacy = `*,pokemon_cards(${_EXPLORER_FULL_CARD_COLS})`;
+    const headers = _supabaseRestHeaders();
+    const urlBase = `${SUPABASE_URL}/rest/v1/pokemon_sets?set_code=eq.${encodeURIComponent(sc)}&select=`;
+    let data;
+    try {
+        const r = await fetch(urlBase + encodeURIComponent(selectTracked), { headers });
+        if (!r.ok) throw new Error(String(r.status));
+        data = await r.json();
+    } catch (e) {
+        const r = await fetch(urlBase + encodeURIComponent(selectLegacy), { headers });
+        if (!r.ok) return null;
+        data = await r.json();
+    }
+    if (!Array.isArray(data) || !data.length) return null;
+    let merged = mapRawSetsToExplorerShape(data, { mergeCardMetrics: true });
+    const n0 = (merged[0].top_25_cards || []).length;
+    if (n0 === 0) {
+        const r2 = await fetch(urlBase + encodeURIComponent(selectLegacy), { headers });
+        if (!r2.ok) return null;
+        const data2 = await r2.json();
+        if (!Array.isArray(data2) || !data2.length) return null;
+        merged = mapRawSetsToExplorerShape(data2, { mergeCardMetrics: true });
+    }
+    try {
+        await mergePackCostHistoryFromPackPricingTable(merged);
+    } catch (e) {
+        console.warn('mergePackCostHistoryFromPackPricingTable skipped:', e);
+    }
+    merged.forEach((m) => {
+        if (typeof SHARED_UTILS !== 'undefined' && SHARED_UTILS.hydrateSetPackCostPipelineFields) {
+            SHARED_UTILS.hydrateSetPackCostPipelineFields(m);
+        }
+    });
+    return merged[0] || null;
+}
+
+// Helper function to fetch Sets and Cards from Supabase REST API (excluding heavy price history)
+async function fetchPokemonSetsFromSupabase() {
+    const selectTracked = `*,pokemon_cards(${_EXPLORER_FULL_CARD_COLS})&pokemon_cards.order=tracked_priority.asc&pokemon_cards.tracked_priority=gte.1`;
+    const selectLegacy = `*,pokemon_cards(${_EXPLORER_FULL_CARD_COLS})`;
+    const pageSize = 25;
+    let data;
+    try {
+        data = await _fetchPokemonSetsPagedSelect(selectTracked, pageSize);
+    } catch (e) {
+        console.warn('tracked pokemon_cards embed failed (column missing or filter unsupported); using legacy fetch.', e);
+        data = await _fetchPokemonSetsPagedSelect(selectLegacy, pageSize);
+    }
+    const nTracked = data.reduce(
+        (n, s) => n + (Array.isArray(s.pokemon_cards) ? s.pokemon_cards.length : 0),
+        0,
+    );
+    if (nTracked === 0) {
+        data = await _fetchPokemonSetsPagedSelect(selectLegacy, pageSize);
+    }
+    const mergedRows = mapRawSetsToExplorerShape(data, { mergeCardMetrics: true });
     try {
         await mergePackCostHistoryFromPackPricingTable(mergedRows);
     } catch (e) {
@@ -203,10 +316,15 @@ async function fetchCardPriceHistory(uniqueCardId) {
 
 /**
  * Predictor / Analytics sidecar JSON from ``predictor_analytics_assets`` (same shapes as ``data/assets/*.json``).
+ * @param {string[]|null} [assetKeys] When set, only those rows are fetched (smaller payload for Predictor).
  * @returns {Promise<Record<string, unknown>|null>} map asset_key → payload, or null if table missing / error / empty.
  */
-async function fetchPredictorAnalyticsAssetsFromSupabase() {
-    const url = `${SUPABASE_URL}/rest/v1/predictor_analytics_assets?select=asset_key,payload`;
+async function fetchPredictorAnalyticsAssetsFromSupabase(assetKeys = null) {
+    let url = `${SUPABASE_URL}/rest/v1/predictor_analytics_assets?select=asset_key,payload`;
+    if (Array.isArray(assetKeys) && assetKeys.length) {
+        const enc = assetKeys.map((k) => encodeURIComponent(String(k))).join(',');
+        url += `&asset_key=in.(${enc})`;
+    }
     const r = await fetch(url, { headers: _supabaseRestHeaders() });
     if (!r.ok) return null;
     const rows = await r.json();

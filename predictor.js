@@ -33,7 +33,13 @@ document.addEventListener('DOMContentLoaded', () => {
             let fromDb = null;
             if (typeof fetchPredictorAnalyticsAssetsFromSupabase === 'function') {
                 try {
-                    fromDb = await fetchPredictorAnalyticsAssetsFromSupabase();
+                    fromDb = await fetchPredictorAnalyticsAssetsFromSupabase([
+                        'character_premium_scores',
+                        'google_trends_momentum',
+                        'artist_scores',
+                        'tcg_macro_interest_by_year',
+                        'predictor_engine_snapshot',
+                    ]);
                 } catch (e) {
                     console.warn('predictor_analytics_assets:', e);
                 }

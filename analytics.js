@@ -5784,20 +5784,20 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             setupChartPinVisibilityObserver();
 
-            try {
-                await runInitialScatterThumbPreload();
-            } catch (e) {
-                console.warn('initial scatter thumb preload', e);
-            } finally {
-                reapplyScatterPointTintsFromPreloadCache();
-            }
-
             titleEl.innerText = 'Comparative Analytics Dashboard';
             updateAnalyticsDashboardMeta();
             if (pg) pg.setDeterminate(1);
             loadingEl.style.display = 'none';
             if (loadingEl) loadingEl.setAttribute('aria-busy', 'false');
             containerEl.style.display = 'block';
+
+            void runInitialScatterThumbPreload()
+                .catch((e) => {
+                    console.warn('initial scatter thumb preload', e);
+                })
+                .finally(() => {
+                    reapplyScatterPointTintsFromPreloadCache();
+                });
 
             renderSpeciesPopularityPanel(speciesPopularityDoc);
 

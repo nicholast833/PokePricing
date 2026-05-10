@@ -10,6 +10,170 @@ document.addEventListener('DOMContentLoaded', () => {
     const closeModal = document.getElementById('closeModal');
 
     let allSets = [];
+    let explorerListCursor = 0;
+    let explorerScrollObserver = null;
+    let explorerSearchDebounce = null;
+    const EXPLORER_INITIAL_SLICE = 12;
+    const EXPLORER_SCROLL_SLICE = 10;
+    const EXPLORER_SEARCH_PREFETCH = 16;
+
+    function mergeExplorerCardSliceInPlace(catalogSets, slice, slim) {
+        const map = new Map((slice || []).map((s) => [String(s.set_code || '').trim().toLowerCase(), s]));
+        catalogSets.forEach((set) => {
+            const k = String(set.set_code || '').trim().toLowerCase();
+            const hit = map.get(k);
+            if (!hit || !Array.isArray(hit.top_25_cards)) return;
+            set.top_25_cards = hit.top_25_cards;
+            if (slim) {
+                set._explorerSlim = true;
+                set._explorerMetricsLoaded = false;
+            } else {
+                set._explorerSlim = false;
+                set._explorerMetricsLoaded = true;
+            }
+        });
+    }
+
+    async function maybeHydrateExplorerFullMetrics(set) {
+        if (!set || set._explorerHydrating) return;
+        if (set._explorerMetricsLoaded) return;
+        if (typeof fetchPokemonSetWithMetricsByCode !== 'function') return;
+        const need =
+            set._explorerSlim === true || !Array.isArray(set.top_25_cards) || set.top_25_cards.length === 0;
+        if (!need) return;
+        set._explorerHydrating = true;
+        try {
+            const full = await fetchPokemonSetWithMetricsByCode(set.set_code);
+            if (!full || !Array.isArray(full.top_25_cards)) return;
+            set.top_25_cards = full.top_25_cards;
+            set._explorerSlim = false;
+            set._explorerMetricsLoaded = true;
+        } catch (e) {
+            console.warn('Explorer full set fetch', e);
+        } finally {
+            set._explorerHydrating = false;
+        }
+    }
+
+    function computeMainCardsCountFromSet(set) {
+        let mainCardsCount = 0;
+        const secretRarities = [
+            'mega hyper rare',
+            'special illustration rare',
+            'ultra rare',
+            'illustration rare',
+        ];
+        if (set.rarity_counts) {
+            Object.entries(set.rarity_counts).forEach(([rarity, count]) => {
+                if (!secretRarities.includes(rarity.toLowerCase())) {
+                    mainCardsCount += count;
+                }
+            });
+        }
+        return mainCardsCount;
+    }
+
+    function buildTopCardsListHtml(set) {
+        const setCodeAttr = escAttr(String(set.set_code || ''));
+        const mainCardsCount = computeMainCardsCountFromSet(set);
+        if (set._explorerHydrating) {
+            return '<li class="card-row"><span style="color:#94a3b8;">Loading card rows…</span></li>';
+        }
+        if (!set.top_25_cards || set.top_25_cards.length === 0) {
+            return '<li class="card-row"><span style="color:#64748b;font-size:0.85rem;">Open this set to load full pricing fields…</span></li>';
+        }
+        return set.top_25_cards
+            .map((card) => {
+                const crate = (card.card_pull_rate || 'N/A').replace('1 in ', '1/').split(' (')[0];
+                const rrate = (set.rarity_pull_rates && set.rarity_pull_rates[card.rarity]
+                    ? set.rarity_pull_rates[card.rarity]
+                    : 'N/A').replace('1 in ', '1/').split(' (')[0];
+                const cn = escHtml(String(card.name || ''));
+                const numDisp = escHtml(String(card.number != null ? card.number : '?'));
+                const numAttr = escAttr(String(card.number != null ? card.number : ''));
+                const nameAttr = escAttr(String(card.name || ''));
+                const liqHint = formatExplorerEbayLiquiditySuffix(card);
+                const imgUrl = card.image_url ? escAttr(String(card.image_url)) : '';
+                const thumbInner = imgUrl
+                    ? `<img src="${imgUrl}" alt="" loading="lazy">`
+                    : '<span style="font-size:0.55rem;color:#64748b;padding:2px;">—</span>';
+                const hasPx = explorerCardHasPositiveMarketUsd(card);
+                const dispUsd = explorerPrimaryDisplayUsd(card);
+                const artistTop = hasPx
+                    ? `<div>Artist: ${escHtml(String(card.artist || 'Unknown'))}</div>`
+                    : '<div class="card-pricing-unavailable">No market pricing data</div>';
+                return `
+                    <li class="card-row">
+                        <div class="card-row-thumb">${thumbInner}</div>
+                        <div class="card-row-main">
+                            <div class="card-name">${cn}</div>
+                            <div class="card-rarity">${escHtml(String(card.rarity || 'Unknown'))} - #${numDisp}/${mainCardsCount}/${set.total_cards || '?'}</div>
+                            <div class="card-artist" style="font-size: 0.75rem; color: var(--text-secondary); margin-top: 2px;">
+                                ${artistTop}
+                                <div style="margin-top:2px;">Card: ${escHtml(crate)} &nbsp;&nbsp; Rarity: ${escHtml(rrate)}</div>
+                            </div>
+                        </div>
+                        <div class="card-row-actions" style="min-width:110px; max-width:140px; text-align:right;">
+                            <div class="card-price" style="font-size:0.95rem;">${hasPx && dispUsd != null ? `$${dispUsd.toFixed(2)}` : '<span class="card-pricing-unavailable">—</span>'}</div>
+                            ${Number(card.collectrics_ebay_listings) > 0 ? `<div style="font-size:0.68rem; color:#94a3b8;">Listings: ${Number(card.collectrics_ebay_listings).toLocaleString()}</div>` : ''}
+                            ${Number(card.collectrics_ebay_sold_volume) > 0 ? `<div style="font-size:0.68rem; color:#94a3b8;">Volume: ${Number(card.collectrics_ebay_sold_volume).toLocaleString()}</div>` : ''}
+                            <button type="button" class="show-art-btn card-detail-btn" data-set-code="${setCodeAttr}" data-card-number="${numAttr}" data-card-name="${nameAttr}" style="margin-top:4px;">Details</button>
+                        </div>
+                    </li>
+                    `;
+            })
+            .join('');
+    }
+
+    function wireExplorerInfiniteScroll() {
+        const sen = document.getElementById('explorer-load-sentinel');
+        if (!sen || explorerScrollObserver) return;
+        let busy = false;
+        explorerScrollObserver = new IntersectionObserver(
+            async (entries) => {
+                if (!entries[0] || !entries[0].isIntersecting || busy) return;
+                if (explorerListCursor >= allSets.length) {
+                    sen.hidden = true;
+                    sen.textContent = '';
+                    return;
+                }
+                if (typeof fetchPokemonSetsCardSliceByCodes !== 'function') return;
+                busy = true;
+                sen.hidden = false;
+                sen.textContent = 'Loading more sets…';
+                const next = allSets
+                    .slice(explorerListCursor, explorerListCursor + EXPLORER_SCROLL_SLICE)
+                    .map((s) => s.set_code)
+                    .filter(Boolean);
+                if (!next.length) {
+                    explorerListCursor = allSets.length;
+                    sen.hidden = true;
+                    sen.textContent = '';
+                    busy = false;
+                    return;
+                }
+                try {
+                    const sl = await fetchPokemonSetsCardSliceByCodes(next, { withMetrics: false });
+                    mergeExplorerCardSliceInPlace(allSets, sl, true);
+                    explorerListCursor += next.length;
+                    const y = window.scrollY;
+                    runFilters();
+                    window.scrollTo(0, y);
+                } catch (e) {
+                    console.warn('Explorer scroll batch', e);
+                } finally {
+                    busy = false;
+                    sen.textContent = '';
+                    sen.hidden = true;
+                    if (explorerListCursor >= allSets.length) {
+                        sen.textContent = '';
+                    }
+                }
+            },
+            { root: null, rootMargin: '280px', threshold: 0 },
+        );
+        explorerScrollObserver.observe(sen);
+    }
 
     function escHtml(s) {
         return String(s)
@@ -416,7 +580,11 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function openCardDetailModal(setCode, cardNumber, cardName) {
-        const { set, card } = findSetAndCard(setCode, cardNumber, cardName);
+        let { set, card } = findSetAndCard(setCode, cardNumber, cardName);
+        if (set && (!card || !Array.isArray(set.top_25_cards) || set.top_25_cards.length === 0)) {
+            await maybeHydrateExplorerFullMetrics(set);
+            ({ card } = findSetAndCard(setCode, cardNumber, cardName));
+        }
         if (!card || !set) return;
         destroyCardDetailCharts();
         const src = card.image_url || '';
@@ -503,12 +671,33 @@ document.addEventListener('DOMContentLoaded', () => {
     const pg = typeof window.PTCG_PAGE_PROGRESS !== 'undefined' ? window.PTCG_PAGE_PROGRESS : null;
     if (pg) pg.begin();
 
-    fetchPokemonSetsFromSupabase()
-        .then((data) => {
-            if (pg) pg.setDeterminate(0.72);
-            if (!Array.isArray(data)) throw new Error('Expected an array of sets in JSON');
-            allSets = data.reverse();
-            if (pg) pg.setDeterminate(0.9);
+    async function bootstrapExplorerDataset() {
+        if (typeof fetchPokemonSetsCatalogOnly === 'function' && typeof fetchPokemonSetsCardSliceByCodes === 'function') {
+            if (pg) pg.setDeterminate(0.32);
+            const catalog = await fetchPokemonSetsCatalogOnly();
+            if (pg) pg.setDeterminate(0.52);
+            allSets = catalog.slice().reverse();
+            explorerListCursor = 0;
+            const firstCodes = allSets
+                .slice(0, EXPLORER_INITIAL_SLICE)
+                .map((s) => String(s.set_code || '').trim())
+                .filter(Boolean);
+            const slice = await fetchPokemonSetsCardSliceByCodes(firstCodes, { withMetrics: false });
+            mergeExplorerCardSliceInPlace(allSets, slice, true);
+            explorerListCursor = Math.min(EXPLORER_INITIAL_SLICE, allSets.length);
+            if (pg) pg.setDeterminate(0.82);
+            return;
+        }
+        const data = await fetchPokemonSetsFromSupabase();
+        if (!Array.isArray(data)) throw new Error('Expected an array of sets in JSON');
+        allSets = data.slice().reverse();
+        explorerListCursor = allSets.length;
+        if (pg) pg.setDeterminate(0.82);
+    }
+
+    bootstrapExplorerDataset()
+        .then(() => {
+            if (pg) pg.setDeterminate(0.92);
             loadingEl.style.display = 'none';
 
             const seriesSet = new Set(allSets.map((s) => s.series).filter(Boolean));
@@ -520,6 +709,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             renderSets(allSets);
             tryOpenCardDetailFromQuery();
+            wireExplorerInfiniteScroll();
             if (pg) pg.setDeterminate(1);
         })
         .catch((error) => {
@@ -546,11 +736,39 @@ document.addEventListener('DOMContentLoaded', () => {
         renderSets(filtered);
     }
 
-    searchInput.addEventListener('input', runFilters);
+    searchInput.addEventListener('input', () => {
+        clearTimeout(explorerSearchDebounce);
+        explorerSearchDebounce = setTimeout(async () => {
+            const term = searchInput.value.toLowerCase();
+            const series = seriesFilter.value;
+            const filtered = allSets.filter((s) => {
+                const matchesSearch = (s.set_name && s.set_name.toLowerCase().includes(term))
+                    || (s.set_code && s.set_code.toLowerCase().includes(term));
+                const matchesSeries = !series || s.series === series;
+                return matchesSearch && matchesSeries;
+            });
+            const need = filtered
+                .filter((s) => !Array.isArray(s.top_25_cards) || s.top_25_cards.length === 0)
+                .slice(0, EXPLORER_SEARCH_PREFETCH)
+                .map((s) => s.set_code)
+                .filter(Boolean);
+            if (need.length && typeof fetchPokemonSetsCardSliceByCodes === 'function') {
+                try {
+                    const sl = await fetchPokemonSetsCardSliceByCodes(need, { withMetrics: false });
+                    mergeExplorerCardSliceInPlace(allSets, sl, true);
+                } catch (e) {
+                    console.warn('Explorer search prefetch', e);
+                }
+            }
+            renderSets(filtered);
+        }, 280);
+    });
     seriesFilter.addEventListener('change', runFilters);
 
     function renderSets(sets) {
         containerEl.innerHTML = '';
+        const senTop = document.getElementById('explorer-load-sentinel');
+        if (senTop) senTop.hidden = true;
         if (sets.length === 0) {
             containerEl.innerHTML = '<p style="text-align: center; color: var(--text-secondary);">No sets found matching your search/filter.</p>';
             return;
@@ -566,72 +784,9 @@ document.addEventListener('DOMContentLoaded', () => {
         const appendSetAccordion = (set) => {
             const setEl = document.createElement('div');
             setEl.className = 'set-item';
+            setEl.dataset.setCode = String(set.set_code || '').trim().toLowerCase();
 
-            let topCardsHtml = '';
-
-            let mainCardsCount = 0;
-            const secretRarities = [
-                'mega hyper rare',
-                'special illustration rare',
-                'ultra rare',
-                'illustration rare'
-            ];
-
-            if (set.rarity_counts) {
-                Object.entries(set.rarity_counts).forEach(([rarity, count]) => {
-                    if (!secretRarities.includes(rarity.toLowerCase())) {
-                        mainCardsCount += count;
-                    }
-                });
-            }
-
-            const setCodeAttr = escAttr(String(set.set_code || ''));
-            if (set.top_25_cards && set.top_25_cards.length > 0) {
-                topCardsHtml = set.top_25_cards.map((card) => {
-                    const crate = (card.card_pull_rate || 'N/A').replace('1 in ', '1/').split(' (')[0];
-                    const rrate = (set.rarity_pull_rates && set.rarity_pull_rates[card.rarity]
-                        ? set.rarity_pull_rates[card.rarity]
-                        : 'N/A').replace('1 in ', '1/').split(' (')[0];
-                    const cn = escHtml(String(card.name || ''));
-                    const numDisp = escHtml(String(card.number != null ? card.number : '?'));
-                    const numAttr = escAttr(String(card.number != null ? card.number : ''));
-                    const nameAttr = escAttr(String(card.name || ''));
-                    const liqHint = formatExplorerEbayLiquiditySuffix(card);
-                    const imgUrl = card.image_url ? escAttr(String(card.image_url)) : '';
-                    const thumbInner = imgUrl
-                        ? `<img src="${imgUrl}" alt="" loading="lazy">`
-                        : '<span style="font-size:0.55rem;color:#64748b;padding:2px;">—</span>';
-                    const hasPx = explorerCardHasPositiveMarketUsd(card);
-                    const dispUsd = explorerPrimaryDisplayUsd(card);
-                    const artistTop = hasPx
-                        ? `<div>Artist: ${escHtml(String(card.artist || 'Unknown'))}</div>`
-                        : '<div class="card-pricing-unavailable">No market pricing data</div>';
-                    const priceInner = hasPx && dispUsd != null
-                        ? `$${dispUsd.toFixed(2)}${liqHint}`
-                        : `<span class="card-pricing-unavailable" title="No positive list, PriceDex, TCGTracking, or tcgapi USD on this card">—</span>${hasPx ? liqHint : ''}`;
-                    return `
-                    <li class="card-row">
-                        <div class="card-row-thumb">${thumbInner}</div>
-                        <div class="card-row-main">
-                            <div class="card-name">${cn}</div>
-                            <div class="card-rarity">${escHtml(String(card.rarity || 'Unknown'))} - #${numDisp}/${mainCardsCount}/${set.total_cards || '?'}</div>
-                            <div class="card-artist" style="font-size: 0.75rem; color: var(--text-secondary); margin-top: 2px;">
-                                ${artistTop}
-                                <div style="margin-top:2px;">Card: ${escHtml(crate)} &nbsp;&nbsp; Rarity: ${escHtml(rrate)}</div>
-                            </div>
-                        </div>
-                        <div class="card-row-actions" style="min-width:110px; max-width:140px; text-align:right;">
-                            <div class="card-price" style="font-size:0.95rem;">${hasPx && dispUsd != null ? `$${dispUsd.toFixed(2)}` : '<span class="card-pricing-unavailable">—</span>'}</div>
-                            ${Number(card.collectrics_ebay_listings) > 0 ? `<div style="font-size:0.68rem; color:#94a3b8;">Listings: ${Number(card.collectrics_ebay_listings).toLocaleString()}</div>` : ''}
-                            ${Number(card.collectrics_ebay_sold_volume) > 0 ? `<div style="font-size:0.68rem; color:#94a3b8;">Volume: ${Number(card.collectrics_ebay_sold_volume).toLocaleString()}</div>` : ''}
-                            <button type="button" class="show-art-btn card-detail-btn" data-set-code="${setCodeAttr}" data-card-number="${numAttr}" data-card-name="${nameAttr}" style="margin-top:4px;">Details</button>
-                        </div>
-                    </li>
-                    `;
-                }).join('');
-            } else {
-                topCardsHtml = '<p style="color: var(--text-secondary); font-size: 0.9rem;">No card data available.</p>';
-            }
+            const topCardsHtml = buildTopCardsListHtml(set);
 
             let raritiesHtml = '';
             if (set.rarity_counts && Object.keys(set.rarity_counts).length > 0) {
@@ -724,11 +879,14 @@ document.addEventListener('DOMContentLoaded', () => {
             `;
 
             const header = setEl.querySelector('.set-header');
-            header.addEventListener('click', () => {
+            header.addEventListener('click', async () => {
                 const isExpanded = setEl.classList.contains('expanded');
                 document.querySelectorAll('#sets-container .set-item').forEach((el) => el.classList.remove('expanded'));
                 if (!isExpanded) {
                     setEl.classList.add('expanded');
+                    await maybeHydrateExplorerFullMetrics(set);
+                    const ul = setEl.querySelector('.top-cards-list');
+                    if (ul) ul.innerHTML = buildTopCardsListHtml(set);
                 }
             });
 
@@ -754,6 +912,16 @@ document.addEventListener('DOMContentLoaded', () => {
             det.appendChild(sum);
             det.appendChild(inner);
             containerEl.appendChild(det);
+        }
+
+        const sen = document.getElementById('explorer-load-sentinel');
+        if (sen) {
+            if (explorerListCursor < allSets.length) {
+                sen.hidden = false;
+            } else {
+                sen.hidden = true;
+                sen.textContent = '';
+            }
         }
     }
 });
