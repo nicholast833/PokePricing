@@ -1,6 +1,8 @@
 document.addEventListener('DOMContentLoaded', () => {
     const loadingEl = document.getElementById('loading');
     const containerEl = document.getElementById('sets-container');
+    const explorerLayoutEl = document.getElementById('explorer-layout');
+    const trendingRoot = document.getElementById('explorer-trending-root');
     const searchInput = document.getElementById('searchInput');
     const seriesFilter = document.getElementById('seriesFilter');
 
@@ -584,6 +586,30 @@ document.addEventListener('DOMContentLoaded', () => {
 
     async function openCardDetailModal(setCode, cardNumber, cardName) {
         let { set, card } = findSetAndCard(setCode, cardNumber, cardName);
+        if (!set && typeof fetchPokemonSetWithMetricsByCode === 'function') {
+            try {
+                const fetched = await fetchPokemonSetWithMetricsByCode(setCode);
+                if (fetched) {
+                    const lc = String(setCode || '').trim().toLowerCase();
+                    const idx = allSets.findIndex((s) => String(s.set_code || '').trim().toLowerCase() === lc);
+                    if (idx >= 0) {
+                        allSets[idx] = { ...allSets[idx], ...fetched };
+                        set = allSets[idx];
+                    } else {
+                        set = fetched;
+                    }
+                }
+            } catch (e) {
+                console.warn('Explorer fetch set for detail', e);
+            }
+        }
+        if (set && !card && Array.isArray(set.top_25_cards)) {
+            const num = String(cardNumber || '').trim();
+            const nm = String(cardName || '').trim();
+            card = set.top_25_cards.find((c) =>
+                String(c.number || '').trim() === num && String(c.name || '').trim() === nm)
+                || set.top_25_cards.find((c) => String(c.number || '').trim() === num) || null;
+        }
         if (set && (!card || !Array.isArray(set.top_25_cards) || set.top_25_cards.length === 0)) {
             await maybeHydrateExplorerFullMetrics(set);
             ({ card } = findSetAndCard(setCode, cardNumber, cardName));
@@ -674,6 +700,99 @@ document.addEventListener('DOMContentLoaded', () => {
         openCardDetailModal(btn.dataset.setCode, btn.dataset.cardNumber, btn.dataset.cardName || '');
     });
 
+    document.addEventListener('click', (e) => {
+        const row = e.target.closest('.explorer-trending-root .explorer-trend-row');
+        if (!row) return;
+        const sc = row.getAttribute('data-set-code') || '';
+        const num = row.getAttribute('data-card-number') || '';
+        const nm = row.getAttribute('data-card-name') || '';
+        openCardDetailModal(sc, num, nm);
+    });
+
+    function renderExplorerTrendingPanel(payload) {
+        if (!trendingRoot) return;
+        const fmt = (x) => (typeof SHARED_UTILS !== 'undefined' && SHARED_UTILS.fmtUsd
+            ? SHARED_UTILS.fmtUsd(x)
+            : (Number.isFinite(Number(x)) ? `$${Number(x).toFixed(2)}` : '—'));
+        const rowBtn = (r, statHtml, statClass) => {
+            const sc = escAttr(String(r.set_code || ''));
+            const num = escAttr(String(r.number != null ? r.number : ''));
+            const nm = escAttr(String(r.name || ''));
+            const img = r.image_url ? escAttr(String(r.image_url)) : '';
+            const thumb = img
+                ? `<div class="explorer-trend-row__thumb"><img src="${img}" alt="" loading="lazy"></div>`
+                : '<div class="explorer-trend-row__thumb"></div>';
+            return `<button type="button" class="explorer-trend-row" data-set-code="${sc}" data-card-number="${num}" data-card-name="${nm}">
+                ${thumb}
+                <div class="explorer-trend-row__main">
+                    <div class="explorer-trend-row__name">${escHtml(String(r.name || '—'))}</div>
+                    <div class="explorer-trend-row__meta">${escHtml(String(r.set_code || ''))} · #${escHtml(String(r.number != null ? r.number : '?'))}</div>
+                </div>
+                <div class="explorer-trend-row__stat ${statClass || ''}">${statHtml}</div>
+            </button>`;
+        };
+        if (!payload || typeof payload !== 'object') {
+            trendingRoot.innerHTML = '<p class="explorer-trending-empty">Trending leaderboards are not available yet. Add the <code>explorer_trending_daily</code> asset (GitHub Action <code>Explorer trending daily</code>).</p>';
+            return;
+        }
+        const prior = Array.isArray(payload.prior_day_dollar_movers) ? payload.prior_day_dollar_movers : [];
+        const week = Array.isArray(payload.week_pct_movers) ? payload.week_pct_movers : [];
+        const grade = Array.isArray(payload.psa10_vs_raw_leaders) ? payload.psa10_vs_raw_leaders : [];
+        const when = payload.computed_at ? `<p class="explorer-trending-placeholder" style="margin:0 0 0.75rem;">Updated ${escHtml(String(payload.computed_at).slice(0, 16).replace('T', ' '))} UTC</p>` : '';
+        const block = (title, hint, rows, kind) => {
+            if (!rows.length) {
+                return `<section class="explorer-trend-block"><h3 class="explorer-trend-block__title">${escHtml(title)}</h3><p class="explorer-trend-block__hint">${hint}</p><p class="explorer-trending-empty">No qualifying cards in the latest scan.</p></section>`;
+            }
+            const lis = rows.map((r) => {
+                if (kind === 'prior') {
+                    const d = Number(r.delta_usd);
+                    const cls = d >= 0 ? 'explorer-trend-row__stat--up' : 'explorer-trend-row__stat--down';
+                    const pct = r.delta_pct != null ? ` (${d >= 0 ? '+' : ''}${Number(r.delta_pct).toFixed(1)}%)` : '';
+                    return rowBtn(r, `${d >= 0 ? '+' : ''}${fmt(d)}${pct}`, cls);
+                }
+                if (kind === 'week') {
+                    const p = Number(r.pct_change);
+                    const cls = p >= 0 ? 'explorer-trend-row__stat--up' : 'explorer-trend-row__stat--down';
+                    return rowBtn(r, `${p >= 0 ? '+' : ''}${p.toFixed(1)}%`, cls);
+                }
+                const ratio = Number(r.psa10_vs_raw_ratio);
+                const pct = r.psa10_vs_raw_pct != null ? `+${Number(r.psa10_vs_raw_pct).toFixed(0)}%` : `×${ratio.toFixed(2)}`;
+                return rowBtn(r, pct, 'explorer-trend-row__stat--up');
+            }).join('');
+            return `<section class="explorer-trend-block"><h3 class="explorer-trend-block__title">${escHtml(title)}</h3><p class="explorer-trend-block__hint">${hint}</p><div class="explorer-trend-list">${lis}</div></section>`;
+        };
+        trendingRoot.innerHTML = when
+            + block(
+                'Prior-day price movers',
+                'Largest day-over-day move on Collectrics JustTCG daily close (tracked cards).',
+                prior,
+                'prior',
+            )
+            + block(
+                '7-day % movers',
+                'Collectrics JustTCG % change vs the last available point on or before seven days ago.',
+                week,
+                'week',
+            )
+            + block(
+                'PSA 10 vs raw lift',
+                'TCGGO eBay sold medians: PSA 10 divided by raw / ungraded (or market) where both exist.',
+                grade,
+                'grade',
+            );
+    }
+
+    async function loadAndRenderExplorerTrending() {
+        if (!trendingRoot || typeof fetchPredictorAnalyticsAssetsFromSupabase !== 'function') return;
+        try {
+            const map = await fetchPredictorAnalyticsAssetsFromSupabase(['explorer_trending_daily']);
+            renderExplorerTrendingPanel(map && map.explorer_trending_daily ? map.explorer_trending_daily : null);
+        } catch (e) {
+            console.warn('Explorer trending fetch', e);
+            trendingRoot.innerHTML = '<p class="explorer-trending-empty">Could not load trending data.</p>';
+        }
+    }
+
     const setsJsonUrl = SHARED_UTILS.resolveDataAssetUrl('pokemon_sets_data.json');
     const pg = typeof window.PTCG_PAGE_PROGRESS !== 'undefined' ? window.PTCG_PAGE_PROGRESS : null;
     if (pg) pg.begin();
@@ -683,7 +802,10 @@ document.addEventListener('DOMContentLoaded', () => {
             if (pg) pg.setDeterminate(0.32);
             const catalog = await fetchPokemonSetsCatalogOnly();
             if (pg) pg.setDeterminate(0.52);
-            allSets = catalog.slice().reverse();
+            allSets = catalog;
+            if (typeof SHARED_UTILS !== 'undefined' && SHARED_UTILS.sortExplorerSetsByRecency) {
+                SHARED_UTILS.sortExplorerSetsByRecency(allSets);
+            }
             explorerListCursor = 0;
             const firstCodes = allSets
                 .slice(0, EXPLORER_INITIAL_SLICE)
@@ -697,7 +819,10 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         const data = await fetchPokemonSetsFromSupabase();
         if (!Array.isArray(data)) throw new Error('Expected an array of sets in JSON');
-        allSets = data.slice().reverse();
+        allSets = data;
+        if (typeof SHARED_UTILS !== 'undefined' && SHARED_UTILS.sortExplorerSetsByRecency) {
+            SHARED_UTILS.sortExplorerSetsByRecency(allSets);
+        }
         explorerListCursor = allSets.length;
         if (pg) pg.setDeterminate(0.82);
     }
@@ -706,6 +831,7 @@ document.addEventListener('DOMContentLoaded', () => {
         .then(() => {
             if (pg) pg.setDeterminate(0.92);
             loadingEl.style.display = 'none';
+            if (explorerLayoutEl) explorerLayoutEl.hidden = false;
 
             const seriesSet = new Set(allSets.map((s) => s.series).filter(Boolean));
             [...seriesSet].sort().forEach((s) => {
@@ -717,6 +843,7 @@ document.addEventListener('DOMContentLoaded', () => {
             renderSets(allSets);
             tryOpenCardDetailFromQuery();
             wireExplorerInfiniteScroll();
+            loadAndRenderExplorerTrending();
             if (pg) pg.setDeterminate(1);
         })
         .catch((error) => {

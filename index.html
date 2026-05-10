@@ -7,7 +7,7 @@
     <link rel="icon" href="favicon.svg" type="image/svg+xml">
     <title>Pokémon TCG Set Explorer</title>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=34">
+    <link rel="stylesheet" href="styles.css?v=35">
 
 </head>
 <body>
@@ -35,10 +35,19 @@
             <p>Loading dataset...</p>
         </div>
 
-        <div id="sets-container" class="sets-container">
-            <!-- Accordions injected via JS -->
+        <div class="explorer-layout" id="explorer-layout" hidden>
+            <div class="explorer-sets-col">
+                <div id="sets-container" class="sets-container sets-container--explorer-compact">
+                    <!-- Accordions injected via JS -->
+                </div>
+                <p id="explorer-load-sentinel" class="explorer-load-sentinel" hidden aria-live="polite"></p>
+            </div>
+            <aside class="explorer-trending-col" aria-label="Trending tracked cards">
+                <div id="explorer-trending-root" class="explorer-trending-root">
+                    <p class="explorer-trending-placeholder">Loading trending…</p>
+                </div>
+            </aside>
         </div>
-        <p id="explorer-load-sentinel" class="explorer-load-sentinel" hidden aria-live="polite"></p>
     </div>
 
     <div id="imageModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="cardDetailTitle">
@@ -54,8 +63,8 @@
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" crossorigin="anonymous"></script>
-    <script src="shared.js?v=42"></script>
-    <script src="supabase-config.js?v=9"></script>
-    <script src="app.js?v=21"></script>
+    <script src="shared.js?v=43"></script>
+    <script src="supabase-config.js?v=10"></script>
+    <script src="app.js?v=22"></script>
 </body>
 </html>

@@ -85,7 +85,7 @@ async function _fetchPokemonSetsPagedSelect(select, pageSize) {
     for (let offset = 0; ; offset += pageSize) {
         const url = `${SUPABASE_URL}/rest/v1/pokemon_sets?select=${encodeURIComponent(
             select,
-        )}&order=set_code.asc&limit=${pageSize}&offset=${offset}`;
+        )}&order=release_date.desc.nullslast&limit=${pageSize}&offset=${offset}`;
         const response = await fetch(url, { headers });
         if (!response.ok) {
             let detail = '';
@@ -143,7 +143,7 @@ async function fetchPokemonSetsCardSliceByCodes(setCodes, opts) {
     const tryFetch = async (sel) => {
         const url = `${SUPABASE_URL}/rest/v1/pokemon_sets?set_code=in.(${inList})&select=${encodeURIComponent(
             sel,
-        )}&order=set_code.asc`;
+        )}&order=release_date.desc.nullslast`;
         const r = await fetch(url, { headers });
         if (!r.ok) throw new Error(`Supabase fetch failed: ${r.status}`);
         return r.json();

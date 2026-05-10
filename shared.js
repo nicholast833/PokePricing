@@ -44,6 +44,32 @@ const SHARED_UTILS = {
         return tok.length >= 2 ? tok.toLowerCase() : '';
     },
 
+    /**
+     * Parse set `release_date` to UTC ms (YYYY-MM-DD or YYYY/MM/DD prefix). Invalid dates sort last.
+     */
+    explorerReleaseDateMs(set) {
+        const rd = set && set.release_date;
+        if (rd == null) return Number.NEGATIVE_INFINITY;
+        const s0 = String(rd).trim().slice(0, 10).replace(/\//g, '-');
+        const t = Date.parse(s0);
+        return Number.isFinite(t) ? t : Number.NEGATIVE_INFINITY;
+    },
+
+    /**
+     * Sort sets newest-first by `release_date`, then `set_code` for stable ordering.
+     * @param {object[]} sets mutates in place
+     * @returns {object[]}
+     */
+    sortExplorerSetsByRecency(sets) {
+        if (!Array.isArray(sets)) return sets;
+        sets.sort((a, b) => {
+            const db = SHARED_UTILS.explorerReleaseDateMs(b) - SHARED_UTILS.explorerReleaseDateMs(a);
+            if (db !== 0) return db;
+            return String(b.set_code || '').localeCompare(String(a.set_code || ''));
+        });
+        return sets;
+    },
+
     /** Release year from `set.release_date` (YYYY/… or YYYY-…), or ''. */
     gemrateReleaseYear(set) {
         const rd = set && set.release_date;
