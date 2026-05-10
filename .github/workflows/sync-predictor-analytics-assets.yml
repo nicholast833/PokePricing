@@ -1,10 +1,8 @@
+# Optional sidecar upload; combined schedule lives in "Predictor analytics pipeline" (dispatch-only sync there).
 name: Sync predictor analytics assets
 
 on:
   workflow_dispatch:
-  schedule:
-    # Weekly — adjust or add paths filter if these files rarely change
-    - cron: "0 6 * * 1"
 
 jobs:
   sync:

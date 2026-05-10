@@ -1,3 +1,4 @@
+# Prefer the combined workflow "Poll Wizard + GemRate (tracked)" for scheduled Wizard+GemRate runs.
 # Exports tracked cards from Supabase → pokemon_sets_data.json, re-fetches Pokémon Wizard card pages
 # for each top_25_cards row, merges chart-derived 1Y history (market, low, mid, high, trend %),
 # then writes Wizard fields back to pokemon_cards (metrics + price_history mirror).

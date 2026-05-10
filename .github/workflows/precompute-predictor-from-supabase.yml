@@ -1,9 +1,8 @@
+# For a daily scheduled run with build first, use "Predictor analytics pipeline".
 name: Precompute predictor engine
 
 on:
   workflow_dispatch: {}
-  schedule:
-    - cron: "35 6 * * *"
   workflow_run:
     workflows:
       - "Build predictor analytics from Supabase"

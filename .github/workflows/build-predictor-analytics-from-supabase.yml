@@ -1,9 +1,8 @@
+# For scheduled build + precompute, use workflow "Predictor analytics pipeline".
 name: Build predictor analytics from Supabase
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "30 5 * * 2"
 
 jobs:
   build:

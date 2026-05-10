@@ -39,7 +39,16 @@ logging.basicConfig(
 # TCGGO history uses up to 3 paginated GETs per card (~90d) + 1 eBay sold + 1 Browse; keep batch smaller vs 800.
 BATCH_SIZE = 270
 
+def _env_truthy(name: str) -> bool:
+    v = (os.environ.get(name) or "").strip().lower()
+    return v in ("1", "true", "yes", "on")
+
+
 def run_queue():
+    skip_tcggo = _env_truthy("DAILY_SYNC_SKIP_TCGGO")
+    if skip_tcggo:
+        logging.info("DAILY_SYNC_SKIP_TCGGO is set: skipping TCGGO price history + TCGGO eBay sold (TCGPro) for this run.")
+
     logging.info("==========================================")
     logging.info(f"Starting Daily Sync Queue (Batch Size: {BATCH_SIZE})")
     
@@ -98,7 +107,7 @@ def run_queue():
             
             # --- 1. TCGGO Price History API ---
             tcggo_id = metrics.get('tcggo_id')
-            if tcggo_id and tcgpro_key:
+            if tcggo_id and tcgpro_key and not skip_tcggo:
                 logging.info(f"  -> Fetching TCGGO history for tcggo_id={tcggo_id}")
                 try:
                     hist_days = max(7, int(os.environ.get("TCGGO_HISTORY_DAYS", "90")))
@@ -149,6 +158,8 @@ def run_queue():
                         logging.info(f"  -> TCGGO eBay: No graded sold data available")
                 except Exception as e:
                     logging.error(f"  -> TCGGO eBay Sold API Failed: {e}")
+            elif skip_tcggo:
+                pass
             else:
                 if not tcggo_id:
                     logging.info("  -> Skipping TCGGO: No tcggo_id found in metrics.")

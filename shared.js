@@ -426,7 +426,7 @@ const SHARED_UTILS = {
     },
 
     /**
-     * Sync active state on unified price history range buttons (1M / 3M / 6M / 1Y).
+     * Sync active state on unified price history range buttons (only those rendered for the card).
      */
     syncUnifiedHistoryRangeUi(rootEl, months) {
         if (!rootEl || !rootEl.querySelector) return;
@@ -441,15 +441,12 @@ const SHARED_UTILS = {
     },
 
     /**
-     * One USD chart: Collectrics (TCG / eBay), TCGGO (TCGPlayer + Cardmarket EUR→USD), Pokémon Wizard,
-     * plus optional eBay sold medians (ungraded / graded) and daily sold count on a secondary axis.
-     * @param {object} [opts]
-     * @param {1|3|6|12|null} [opts.historyWindowMonths] — slice to last N calendar months from newest label; omit/null = full span (then trim-to-data).
-     * @returns {{ labels: string[], datasets: object[], titleNote: string, skipStandaloneWizard: boolean, hasY1Axis: boolean } | null}
+     * Sorted YYYY-MM-DD union of every date axis source used by the unified USD price chart.
+     * @param {object} card
+     * @returns {string[]}
      */
-    buildExplorerUnifiedPriceChartPack(card, opts) {
-        if (!card) return null;
-        const o = opts && typeof opts === 'object' ? opts : {};
+    collectUnifiedPriceHistorySortedLabels(card) {
+        if (!card) return [];
         const ceJust = Array.isArray(card.collectrics_history_justtcg) ? card.collectrics_history_justtcg : [];
         const ceEbayHist = Array.isArray(card.collectrics_history_ebay) ? card.collectrics_history_ebay : [];
         const rng = SHARED_UTILS.collectricsEbayEndedRangeSeries(card);
@@ -483,7 +480,6 @@ const SHARED_UTILS = {
             if (dk.length >= 10) allLabelsSet.add(dk.slice(0, 10));
         });
 
-        // New API pipeline: tcggo_market_history array
         const tcggoApiHistPre = Array.isArray(card.tcggo_market_history) ? card.tcggo_market_history : [];
         tcggoApiHistPre.forEach((r) => {
             const dk = String(r.date || '').slice(0, 10);
@@ -497,8 +493,75 @@ const SHARED_UTILS = {
             if (dk.length >= 10) allLabelsSet.add(dk);
         });
 
-        let labels = Array.from(allLabelsSet).filter(Boolean).sort();
+        return Array.from(allLabelsSet).filter(Boolean).sort();
+    },
+
+    /**
+     * Which 1M / 3M / 6M / 1Y windows still yield at least two x-axis points after the same slice + trim as the chart pack.
+     * @param {object} card
+     * @returns {number[]}
+     */
+    getUnifiedPriceHistoryAvailableWindowMonths(card) {
+        if (!card) return [];
+        if (Array.isArray(card._ptcgUnifiedAvailMonthsCache)) return card._ptcgUnifiedAvailMonthsCache.slice();
+        if (SHARED_UTILS.collectUnifiedPriceHistorySortedLabels(card).length < 2) {
+            card._ptcgUnifiedAvailMonthsCache = [];
+            return [];
+        }
+        const out = [];
+        for (const m of [1, 3, 6, 12]) {
+            const p = SHARED_UTILS.buildExplorerUnifiedPriceChartPack(card, { historyWindowMonths: m });
+            if (p && Array.isArray(p.labels) && p.labels.length >= 2) out.push(m);
+        }
+        card._ptcgUnifiedAvailMonthsCache = out.slice();
+        return out.slice();
+    },
+
+    /**
+     * @param {object} card
+     * @param {unknown} optsHistMo
+     * @param {unknown} sessionHistMo
+     * @returns {{ histMo: number, available: number[] }}
+     */
+    resolveUnifiedHistoryWindowMonths(card, optsHistMo, sessionHistMo) {
+        const available = SHARED_UTILS.getUnifiedPriceHistoryAvailableWindowMonths(card);
+        let histMo = optsHistMo != null ? Number(optsHistMo) : NaN;
+        if (!Number.isFinite(histMo) || histMo <= 0) {
+            const s = Number(sessionHistMo);
+            histMo = Number.isFinite(s) && s > 0 ? s : NaN;
+        }
+        if (!available.length) {
+            return { histMo: null, available: [] };
+        }
+        if (!available.includes(histMo)) {
+            const prefer = [3, 6, 1, 12];
+            const pick = prefer.find((x) => available.includes(x));
+            histMo = pick != null ? pick : available[0];
+        }
+        return { histMo, available };
+    },
+
+    /**
+     * One USD chart: Collectrics (TCG / eBay), TCGGO (TCGPlayer + Cardmarket EUR→USD), Pokémon Wizard,
+     * plus optional eBay sold medians (ungraded / graded) and daily sold count on a secondary axis.
+     * @param {object} [opts]
+     * @param {1|3|6|12|null} [opts.historyWindowMonths] — slice to last N calendar months from newest label; omit/null = full span (then trim-to-data).
+     * @returns {{ labels: string[], datasets: object[], titleNote: string, skipStandaloneWizard: boolean, hasY1Axis: boolean } | null}
+     */
+    buildExplorerUnifiedPriceChartPack(card, opts) {
+        if (!card) return null;
+        const o = opts && typeof opts === 'object' ? opts : {};
+        const ceJust = Array.isArray(card.collectrics_history_justtcg) ? card.collectrics_history_justtcg : [];
+        const ceEbayHist = Array.isArray(card.collectrics_history_ebay) ? card.collectrics_history_ebay : [];
+        const rng = SHARED_UTILS.collectricsEbayEndedRangeSeries(card);
+        const tg = card.tcggo;
+        const ph = tg && tg.price_history_en;
+        const daily = ph && ph.daily && typeof ph.daily === 'object' ? ph.daily : null;
+        const wizRows = SHARED_UTILS.filterWizardPriceHistoryRows(card.pokemon_wizard_price_history || []);
+
+        let labels = SHARED_UTILS.collectUnifiedPriceHistorySortedLabels(card);
         if (labels.length < 2) return null;
+        const allLabelsSet = new Set(labels);
 
         const datasets = [];
         const rate = SHARED_UTILS.getEurUsdRate();
@@ -1763,6 +1826,7 @@ const SHARED_UTILS = {
 
     hydrateCardPipelineFields(card) {
         if (!card || typeof card !== 'object') return;
+        delete card._ptcgUnifiedAvailMonthsCache;
 
         const hist = Array.isArray(card.tcggo_market_history) ? card.tcggo_market_history : null;
         const dailyExisting = card.tcggo && card.tcggo.price_history_en && card.tcggo.price_history_en.daily;
@@ -2533,15 +2597,18 @@ const SHARED_UTILS = {
         const unifiedMarketPack = SHARED_UTILS.buildExplorerUnifiedPriceChartPack(card);
         if (unifiedMarketPack) {
             const fx = SHARED_UTILS.getEurUsdRate().toFixed(3);
-            const rangeBar = `<div class="card-detail-unified-range" role="group" aria-label="Price history window">
+            const availableMonths = SHARED_UTILS.getUnifiedPriceHistoryAvailableWindowMonths(card);
+            let rangeBar = '';
+            if (availableMonths.length > 1) {
+                const btns = availableMonths.map((m) => {
+                    const lbl = m === 12 ? '1Y' : `${m}M`;
+                    return `<button type="button" class="card-detail-unified-range__btn" data-ptcg-history-months="${m}">${lbl}</button>`;
+                }).join('');
+                rangeBar = `<div class="card-detail-unified-range" role="group" aria-label="Price history window">
                 <span class="card-detail-unified-range__lbl">Window</span>
-                <div class="card-detail-unified-range__btns">
-                    <button type="button" class="card-detail-unified-range__btn" data-ptcg-history-months="1">1M</button>
-                    <button type="button" class="card-detail-unified-range__btn" data-ptcg-history-months="3">3M</button>
-                    <button type="button" class="card-detail-unified-range__btn" data-ptcg-history-months="6">6M</button>
-                    <button type="button" class="card-detail-unified-range__btn" data-ptcg-history-months="12">1Y</button>
-                </div>
+                <div class="card-detail-unified-range__btns">${btns}</div>
             </div>`;
+            }
             const escU = SHARED_UTILS.escHtml;
             const noteTech = unifiedMarketPack.titleNote
                 ? `<p class="card-detail-unified-help__p">${escU(String(unifiedMarketPack.titleNote))}</p>`
@@ -3281,15 +3348,18 @@ const SHARED_UTILS = {
         SHARED_UTILS.hydrateCardPipelineFields(card);
         if (typeof Chart === 'undefined') return;
         const co = chartOpts && typeof chartOpts === 'object' ? chartOpts : {};
-        let histMo = co.historyWindowMonths != null ? Number(co.historyWindowMonths) : NaN;
-        if (!Number.isFinite(histMo) || histMo <= 0) {
-            try {
-                histMo = parseInt(sessionStorage.getItem('ptcg-unified-history-months'), 10);
-            } catch (e) {
-                histMo = NaN;
-            }
+        let sessionMo = NaN;
+        try {
+            sessionMo = parseInt(sessionStorage.getItem('ptcg-unified-history-months'), 10);
+        } catch (e) {
+            sessionMo = NaN;
         }
-        if (![1, 3, 6, 12].includes(histMo)) histMo = 3;
+        const { histMo } = SHARED_UTILS.resolveUnifiedHistoryWindowMonths(
+            card,
+            co.historyWindowMonths,
+            sessionMo,
+        );
+        const unifiedPackOpts = histMo != null && Number.isFinite(histMo) ? { historyWindowMonths: histMo } : {};
 
         const { tickColor, gridColor } = SHARED_UTILS.getChartAxisColors();
         const idPrefix = card.id ? card.id.replace(/\W/g, '_') : 'shared';
@@ -3302,7 +3372,7 @@ const SHARED_UTILS = {
         const collectricsJustOnly = ceJust.length > 1 && !collectricsSplit;
         const collectricsEbayHistOnly = ceEbayHist.length > 1 && !collectricsSplit;
         const collectricsBlendOnly = ceBlend.length > 1 && !collectricsSplit && !collectricsJustOnly && !collectricsEbayHistOnly;
-        const unifiedMarketPack = SHARED_UTILS.buildExplorerUnifiedPriceChartPack(card, { historyWindowMonths: histMo });
+        const unifiedMarketPack = SHARED_UTILS.buildExplorerUnifiedPriceChartPack(card, unifiedPackOpts);
         const canvasUnifiedDyn = document.getElementById(`${idPrefix}_ceUnified`);
 
         if (unifiedMarketPack && canvasUnifiedDyn) {

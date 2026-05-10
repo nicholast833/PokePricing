@@ -211,15 +211,18 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         if (typeof Chart === 'undefined') return;
         const co = chartOpts && typeof chartOpts === 'object' ? chartOpts : {};
-        let histMo = co.historyWindowMonths != null ? Number(co.historyWindowMonths) : NaN;
-        if (!Number.isFinite(histMo) || histMo <= 0) {
-            try {
-                histMo = parseInt(sessionStorage.getItem('ptcg-unified-history-months'), 10);
-            } catch (e) {
-                histMo = NaN;
-            }
+        let sessionMo = NaN;
+        try {
+            sessionMo = parseInt(sessionStorage.getItem('ptcg-unified-history-months'), 10);
+        } catch (e) {
+            sessionMo = NaN;
         }
-        if (![1, 3, 6, 12].includes(histMo)) histMo = 3;
+        const { histMo } = SHARED_UTILS.resolveUnifiedHistoryWindowMonths(
+            card,
+            co.historyWindowMonths,
+            sessionMo,
+        );
+        const unifiedPackOpts = histMo != null && Number.isFinite(histMo) ? { historyWindowMonths: histMo } : {};
 
         const { tickColor, gridColor } = SHARED_UTILS.getChartAxisColors();
         const baseScale = {
@@ -234,7 +237,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const collectricsJustOnly = ceJust.length > 1 && !collectricsSplit;
         const collectricsEbayHistOnly = ceEbayHist.length > 1 && !collectricsSplit;
         const collectricsBlendOnly = ceBlend.length > 1 && !collectricsSplit && !collectricsJustOnly && !collectricsEbayHistOnly;
-        const unifiedMarketPack = SHARED_UTILS.buildExplorerUnifiedPriceChartPack(card, { historyWindowMonths: histMo });
+        const unifiedMarketPack = SHARED_UTILS.buildExplorerUnifiedPriceChartPack(card, unifiedPackOpts);
         const canvasUnifiedExplorer = document.getElementById('explorerChartCeUnified');
 
         if (unifiedMarketPack && canvasUnifiedExplorer) {
@@ -643,6 +646,10 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!btn) return;
         const m = Number(btn.getAttribute('data-ptcg-history-months'));
         if (![1, 3, 6, 12].includes(m)) return;
+        const avail = window._ptcgExplorerDetailCard
+            ? SHARED_UTILS.getUnifiedPriceHistoryAvailableWindowMonths(window._ptcgExplorerDetailCard)
+            : [];
+        if (avail.length && !avail.includes(m)) return;
         try {
             sessionStorage.setItem('ptcg-unified-history-months', String(m));
         } catch (err) { /* ignore */ }

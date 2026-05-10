@@ -457,6 +457,10 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!btn || !btn.closest('#prediction-stats-grid')) return;
         const m = Number(btn.getAttribute('data-ptcg-history-months'));
         if (![1, 3, 6, 12].includes(m)) return;
+        const avail = window._currentPredictorCard
+            ? SHARED_UTILS.getUnifiedPriceHistoryAvailableWindowMonths(window._currentPredictorCard)
+            : [];
+        if (avail.length && !avail.includes(m)) return;
         try {
             sessionStorage.setItem('ptcg-unified-history-months', String(m));
         } catch (err) { /* ignore */ }

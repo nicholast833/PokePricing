@@ -1,3 +1,4 @@
+# Prefer the combined workflow "Poll Wizard + GemRate (tracked)" for scheduled Wizard+GemRate runs.
 # Export tracked cards from Supabase → pokemon_sets_data.json, run GemRate Universal Pop
 # mapping + per-set card grids for every set's top_25_cards, then push gemrate metrics + set links
 # back to Supabase (metrics.gemrate on cards; gemrate_* merged into pokemon_sets.metadata).
