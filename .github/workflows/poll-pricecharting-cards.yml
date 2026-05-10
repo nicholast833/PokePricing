@@ -1,0 +1,71 @@
+# Query Supabase (in memory) → scrape PriceCharting → merge pricecharting_* into pokemon_cards.metrics (no JSON file).
+#
+# Secrets: SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY (as SUPABASE_KEY). No PriceCharting API (public HTML).
+name: Poll PriceCharting (cards)
+
+on:
+  workflow_dispatch:
+    inputs:
+      sleep:
+        description: "Seconds between HTTP requests (sync_pricecharting --sleep)"
+        type: string
+        default: "0.35"
+      max_cards:
+        description: "Cap successful scrapes (0 = no cap; long runs)"
+        type: string
+        default: "400"
+      tracked_only:
+        description: "Only cards with metrics.tracked_priority >= 1"
+        type: boolean
+        default: true
+      skip_supabase_push:
+        description: "Export + scrape only; do not apply-pricecharting"
+        type: boolean
+        default: false
+
+jobs:
+  poll_pricecharting:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
+    concurrency:
+      group: poll-pricecharting-cards
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: github_actions/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r github_actions/requirements.txt
+
+      - name: Poll PriceCharting and apply to Supabase
+        run: |
+          set -euo pipefail
+          EXTRA=""
+          if [ "${{ inputs.tracked_only }}" = "true" ]; then
+            EXTRA="$EXTRA --tracked-only"
+          fi
+          MAX="${{ inputs.max_cards }}"
+          if [ -n "$MAX" ] && [ "$MAX" != "0" ]; then
+            EXTRA="$EXTRA --max-cards $MAX"
+          fi
+          EXTRA="$EXTRA --sleep ${{ inputs.sleep }}"
+          if [ "${{ inputs.skip_supabase_push }}" = "true" ]; then
+            python github_actions/poll_pricecharting_cards.py --skip-apply $EXTRA
+          else
+            python github_actions/poll_pricecharting_cards.py $EXTRA
+          fi

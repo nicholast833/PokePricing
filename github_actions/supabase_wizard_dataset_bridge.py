@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Export Supabase pokemon_sets + pokemon_cards into pokemon_sets_data.json (Explorer shape),
-and apply merge fields from that JSON back onto Supabase (Wizard + GemRate).
+and apply merge fields from that JSON back onto Supabase (Wizard + GemRate + PriceCharting).
 
 CI usage:
   python supabase_wizard_dataset_bridge.py export --output pokemon_sets_data.json
@@ -9,6 +9,10 @@ CI usage:
   python supabase_wizard_dataset_bridge.py apply-wizard --input pokemon_sets_data.json
   python scrape/gemrate_scraper.py --data pokemon_sets_data.json
   python supabase_wizard_dataset_bridge.py apply-gemrate --input pokemon_sets_data.json
+  python scrape/sync_pricecharting.py --from-supabase --sleep 0.35 --max-cards 500
+  # or JSON round-trip:
+  python scrape/sync_pricecharting.py --data pokemon_sets_data.json --sleep 0.35
+  python supabase_wizard_dataset_bridge.py apply-pricecharting --input pokemon_sets_data.json
   python github_actions/poll_pack_costs_all_sets.py
   python supabase_wizard_dataset_bridge.py apply-pack-costs --input pokemon_sets_data.json
 
@@ -34,7 +38,7 @@ import sys
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 try:
     from dotenv import load_dotenv
@@ -115,7 +119,8 @@ def _merge_set_metadata_for_export(row: Dict[str, Any]) -> Dict[str, Any]:
     return base
 
 
-def export_json(output_path: Path) -> None:
+def export_sets_data() -> List[Dict[str, Any]]:
+    """In-memory export: same structure as ``pokemon_sets_data.json`` (sets with ``top_25_cards``)."""
     client = _supabase()
     print("Fetching pokemon_sets ...", flush=True)
     sets = _fetch_paginated(client, "pokemon_sets", "*", order="set_code")
@@ -142,9 +147,15 @@ def export_json(output_path: Path) -> None:
         row["top_25_cards"] = top
         data.append(row)
 
+    print(f"Loaded {len(data)} sets, {len(cards)} cards from Supabase", flush=True)
+    return data
+
+
+def export_json(output_path: Path) -> None:
+    data = export_sets_data()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(data, indent=4, ensure_ascii=False) + "\n", encoding="utf-8")
-    print(f"Wrote {len(data)} sets, {len(cards)} cards -> {output_path}", flush=True)
+    print(f"Wrote {len(data)} sets -> {output_path}", flush=True)
 
 
 def _collect_flat_cards(data: List[Any]) -> Dict[str, Dict[str, Any]]:
@@ -513,8 +524,81 @@ def clear_pack_cost_metadata_from_db(
     )
 
 
+def _pricecharting_patch_from_flat_card(card: Dict[str, Any]) -> Dict[str, Any]:
+    top = {k: v for k, v in card.items() if str(k).startswith("pricecharting_")}
+    m = card.get("metrics") if isinstance(card.get("metrics"), dict) else {}
+    from_m = {k: v for k, v in m.items() if str(k).startswith("pricecharting_")}
+    return {**from_m, **top}
+
+
+def apply_pricecharting_from_data(
+    raw: List[Any],
+    *,
+    batch_size: int = 80,
+    only_card_ids: Optional[Set[str]] = None,
+) -> None:
+    if not isinstance(raw, list):
+        raise SystemExit("Dataset must be a JSON list of sets")
+    flat_by_id = _collect_flat_cards(raw)
+    if not flat_by_id:
+        print("No cards found under top_25_cards; nothing to apply.", flush=True)
+        return
+
+    client = _supabase()
+    ids = sorted(flat_by_id.keys())
+    if only_card_ids is not None:
+        ids = sorted(uid for uid in ids if uid in only_card_ids)
+    if not ids:
+        print("No PriceCharting card ids to apply (empty selection).", flush=True)
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    ok = err = skip_empty = 0
+    print(f"Applying PriceCharting fields for {len(ids)} cards (batched) ...", flush=True)
+
+    for i in range(0, len(ids), batch_size):
+        chunk = ids[i : i + batch_size]
+        res = client.table("pokemon_cards").select("unique_card_id,metrics").in_("unique_card_id", chunk).execute()
+        rows = {r["unique_card_id"]: r for r in (res.data or []) if r.get("unique_card_id")}
+
+        for uid in chunk:
+            flat = flat_by_id.get(uid) or {}
+            patch = _pricecharting_patch_from_flat_card(flat)
+            if not patch:
+                skip_empty += 1
+                continue
+            cur = rows.get(uid)
+            if not cur:
+                err += 1
+                print(f"  skip: no DB row for {uid!r}", flush=True)
+                continue
+            old_m = cur.get("metrics") if isinstance(cur.get("metrics"), dict) else {}
+            new_m = {**old_m, **patch}
+            try:
+                client.table("pokemon_cards").update({"metrics": new_m, "last_synced_at": now}).eq(
+                    "unique_card_id", uid
+                ).execute()
+                ok += 1
+            except Exception as e:
+                err += 1
+                print(f"  update failed {uid!r}: {e}", flush=True)
+
+        print(f"  progress {min(i + batch_size, len(ids))}/{len(ids)} (ok={ok} err={err})", flush=True)
+
+    print(
+        f"Done. pricecharting updated_ok={ok} skipped_no_pc_fields={skip_empty} errors={err}",
+        flush=True,
+    )
+
+
+def apply_pricecharting_from_json(input_path: Path, *, batch_size: int = 80) -> None:
+    raw = json.loads(input_path.read_text(encoding="utf-8"))
+    if not isinstance(raw, list):
+        raise SystemExit("pokemon_sets_data.json must be a list of sets")
+    apply_pricecharting_from_data(raw, batch_size=batch_size)
+
+
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Supabase ↔ pokemon_sets_data.json bridge (Wizard + GemRate)")
+    ap = argparse.ArgumentParser(description="Supabase ↔ pokemon_sets_data.json bridge (Wizard + GemRate + PriceCharting)")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     e = sub.add_parser("export", help="Write pokemon_sets_data.json from Supabase")
@@ -526,6 +610,13 @@ def main() -> int:
 
     g = sub.add_parser("apply-gemrate", help="Merge gemrate card metrics + set GemRate fields from JSON")
     g.add_argument("--input", type=Path, default=ROOT / "pokemon_sets_data.json")
+
+    pc = sub.add_parser(
+        "apply-pricecharting",
+        help="Merge pricecharting_* from JSON card rows into pokemon_cards.metrics",
+    )
+    pc.add_argument("--input", type=Path, default=ROOT / "pokemon_sets_data.json")
+    pc.add_argument("--batch-size", type=int, default=80)
 
     p = sub.add_parser(
         "apply-pack-costs",
@@ -591,6 +682,8 @@ def main() -> int:
         apply_wizard_from_json(args.input.resolve(), batch_size=max(1, int(args.batch_size)))
     elif args.cmd == "apply-gemrate":
         apply_gemrate_from_json(args.input.resolve())
+    elif args.cmd == "apply-pricecharting":
+        apply_pricecharting_from_json(args.input.resolve(), batch_size=max(1, int(args.batch_size)))
     elif args.cmd == "apply-pack-costs":
         apply_pack_costs_from_json(
             args.input.resolve(),

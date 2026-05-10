@@ -1203,7 +1203,7 @@ def run(
                 )
                 print(
                     "  -> skip: no TCG product id and no set-listing match "
-                    "(add pricecharting_set_paths.json + run sync_pricecharting.py for sold comps)",
+                    "(add scrape/pricecharting_game_slugs.json + run scrape/sync_pricecharting.py for PC comps)",
                     flush=True,
                 )
                 continue
