@@ -2343,15 +2343,32 @@ const SHARED_UTILS = {
         const rows = Array.isArray(raw) ? raw : [];
         const out = [];
         const esc = (s) => String(s || '').trim();
+        const preferredMedianKeys = ['median_sold_price', 'median_price', 'ebay_median_price', 'sold_median', 'median_usd', 'median'];
+        const badMedianSub = ['volume', 'count', 'sample', 'sales', 'listing', 'observation', 'num_'];
         rows.forEach((row) => {
             if (!row || typeof row !== 'object') return;
             let median = null;
-            Object.keys(row).forEach((k) => {
-                const lk = k.toLowerCase();
-                if (!lk.includes('median') && lk !== 'mean' && lk !== 'average' && lk !== 'avg') return;
+            preferredMedianKeys.forEach((k) => {
+                if (median != null) return;
+                if (!Object.prototype.hasOwnProperty.call(row, k)) return;
                 const v = Number(row[k]);
-                if (Number.isFinite(v) && v > 0 && median == null) median = v;
+                if (Number.isFinite(v) && v > 0) median = v;
             });
+            if (median == null) {
+                /** @type {{ pri: number, k: string, v: number }[]} */
+                const cands = [];
+                Object.keys(row).forEach((k) => {
+                    const lk = k.toLowerCase();
+                    if (!lk.includes('median') && lk !== 'mean' && lk !== 'average' && lk !== 'avg') return;
+                    if (badMedianSub.some((b) => lk.includes(b))) return;
+                    const v = Number(row[k]);
+                    if (!Number.isFinite(v) || v <= 0) return;
+                    const pri = lk.includes('median') ? 0 : 1;
+                    cands.push({ pri, k: lk, v });
+                });
+                cands.sort((a, b) => a.pri - b.pri || a.k.localeCompare(b.k));
+                if (cands.length) median = cands[0].v;
+            }
             if (median == null) {
                 ['price', 'sold_price', 'ebay_price', 'amount'].forEach((k) => {
                     const v = Number(row[k]);

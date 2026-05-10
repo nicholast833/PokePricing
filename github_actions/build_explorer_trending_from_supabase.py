@@ -4,11 +4,15 @@ Build Explorer “trending” leaderboards from tracked ``pokemon_cards`` rows a
 ``predictor_analytics_assets`` key ``explorer_trending_daily`` (JSON consumed by index.html).
 
 Inspired by Collectrics-style boards (prior-day movers, graded vs raw lift):
-  - prior_day_dollar_movers — last two Collectrics JustTCG daily points (``j_raw_price``)
-  - week_pct_movers — % change vs best JustTCG point on or before ~7d before latest
-  - psa10_vs_raw_leaders — PSA 10 vs raw/ungraded median from ``tcggo_ebay_sold_prices`` (TCGGO)
+  - prior_day_dollar_movers — last two daily closes: Collectrics ``j_raw_price`` when present,
+    else merged ``price_history.tcggo_market_history`` ``price_usd`` (TCGGO daily sync).
+  - week_pct_movers — same blended series vs best point on or before ~7d before latest
+  - psa10_vs_raw_leaders — PSA 10 vs raw from ``tcggo_ebay_sold_prices`` with robust medians
+    (no ``min()`` over mislabeled grades; ratio sanity cap via ``EXPLORER_TRENDING_MAX_PSA_RAW_RATIO``).
 
 Env: ``SUPABASE_URL`` + ``SUPABASE_SERVICE_ROLE_KEY`` or ``SUPABASE_KEY``.
+Optional: ``EXPLORER_TRENDING_MAX_PSA_RAW_RATIO`` (default ``75``) drops PSA10/raw rows above this ratio
+from ``psa10_vs_raw_leaders`` (guards mislabeled TCGGO grade rows).
 
   python github_actions/build_explorer_trending_from_supabase.py
   python github_actions/build_explorer_trending_from_supabase.py --dry-run
@@ -19,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import re
 import sys
 from datetime import datetime, timedelta, timezone
@@ -45,14 +50,56 @@ def _num(x: Any) -> Optional[float]:
     return v if math.isfinite(v) else None
 
 
+def _median_simple(vals: List[float]) -> Optional[float]:
+    pos = [float(x) for x in vals if isinstance(x, (int, float)) and math.isfinite(float(x)) and float(x) > 0]
+    if not pos:
+        return None
+    pos.sort()
+    n = len(pos)
+    mid = n // 2
+    if n % 2:
+        return pos[mid]
+    return (pos[mid - 1] + pos[mid]) / 2.0
+
+
+_MEDIAN_KEY_BAD = ("volume", "count", "sample", "sales", "listing", "observation", "num_")
+
+
 def _median_from_tcggo_sold_row(row: Dict[str, Any]) -> Optional[float]:
+    """Pick a single positive USD-like median from a TCGGO /ebay-sold-prices row (avoid count/volume fields)."""
+    preferred = (
+        "median_sold_price",
+        "median_price",
+        "ebay_median_price",
+        "sold_median",
+        "median_usd",
+        "median",
+    )
+    lk_to_orig = {str(k).lower(): k for k in row}
+    for pk in preferred:
+        orig = lk_to_orig.get(pk.lower())
+        if orig is not None:
+            n = _num(row.get(orig))
+            if n is not None and n > 0:
+                return n
+    best_key: Optional[Tuple[int, str]] = None
+    picked_val: Optional[float] = None
     for k, v in row.items():
         lk = str(k).lower()
-        if not any(t in lk for t in ("median", "mean", "average", "avg")):
+        if "median" not in lk and "mean" not in lk and "average" not in lk and lk not in ("avg",):
+            continue
+        if any(b in lk for b in _MEDIAN_KEY_BAD):
             continue
         n = _num(v)
-        if n is not None and n > 0:
-            return n
+        if n is None or n <= 0:
+            continue
+        pri = 0 if "median" in lk else 1
+        cand = (pri, str(k))
+        if best_key is None or cand < best_key:
+            best_key = cand
+            picked_val = n
+    if picked_val is not None:
+        return picked_val
     for k in ("price", "sold_price", "ebay_price", "amount"):
         n = _num(row.get(k))
         if n is not None and n > 0:
@@ -90,6 +137,45 @@ def _justtcg_sorted(flat: Dict[str, Any]) -> List[Tuple[str, float]]:
             continue
         out.append((dk, p))
     out.sort(key=lambda t: t[0])
+    return out
+
+
+def _tcggo_market_sorted(flat: Dict[str, Any]) -> List[Tuple[str, float]]:
+    """Daily TCGPlayer market USD from ``price_history.tcggo_market_history`` (daily queue)."""
+    ph = flat.get("price_history")
+    if not isinstance(ph, dict):
+        return []
+    hist = ph.get("tcggo_market_history")
+    if not isinstance(hist, list):
+        return []
+    out: List[Tuple[str, float]] = []
+    for r in hist:
+        if not isinstance(r, dict):
+            continue
+        dk = str(r.get("date") or "")[:10]
+        if len(dk) < 10:
+            continue
+        p = _num(r.get("price_usd"))
+        if p is None or p <= 0:
+            p = _num(r.get("tcg_player_market"))
+        if p is None or p <= 0:
+            continue
+        out.append((dk, p))
+    out.sort(key=lambda t: t[0])
+    return out
+
+
+def _merged_daily_close_sorted(flat: Dict[str, Any]) -> List[Tuple[str, float]]:
+    """
+    One price per calendar day for movers: Collectrics JustTCG wins on overlap,
+    else TCGGO market history fills gaps (and supplies series when Collectrics is empty).
+    """
+    by_day: Dict[str, float] = {}
+    for dk, p in _tcggo_market_sorted(flat):
+        by_day[dk] = p
+    for dk, p in _justtcg_sorted(flat):
+        by_day[dk] = p
+    out = [(d, by_day[d]) for d in sorted(by_day)]
     return out
 
 
@@ -139,7 +225,40 @@ def _week_pct_move(pts: List[Tuple[str, float]]) -> Optional[Dict[str, Any]]:
     }
 
 
+_SLAB_GRADER_RE = re.compile(
+    r"\b(psa|bgs|beckett|cgc|sgc|tag)\b",
+    re.I,
+)
+
+
+def _label_looks_graded_slab(lbl: str) -> bool:
+    s = str(lbl or "").strip().lower()
+    if not s:
+        return False
+    if _SLAB_GRADER_RE.search(s):
+        return True
+    if "slab" in s or "subgrade" in s:
+        return True
+    return False
+
+
+def _label_looks_explicit_raw(lbl: str) -> bool:
+    s = str(lbl or "").strip().lower()
+    if not s:
+        return False
+    if "raw" in s or "ungraded" in s or "not graded" in s:
+        return True
+    if re.search(
+        r"\b(nm|near mint|near-mint|lightly played|moderately played|heavily played|damaged)\b",
+        s,
+    ):
+        return True
+    return False
+
+
 def _psa10_vs_raw(flat: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    max_ratio = float(os.environ.get("EXPLORER_TRENDING_MAX_PSA_RAW_RATIO", "75"))
+
     rows = flat.get("tcggo_ebay_sold_prices")
     if not isinstance(rows, list) or len(rows) < 1:
         return None
@@ -153,26 +272,42 @@ def _psa10_vs_raw(flat: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         parsed.append((_tcggo_sold_label(row), m))
     if len(parsed) < 1:
         return None
-    psa10 = None
-    for lbl, m in parsed:
-        if "psa" in lbl and re.search(r"\b10\b", lbl):
-            psa10 = m if psa10 is None else max(psa10, m)
-    raw_m = None
-    for lbl, m in parsed:
-        if "raw" in lbl or "ungraded" in lbl:
-            raw_m = m if raw_m is None else min(raw_m, m)
-    if raw_m is None:
-        for lbl, m in parsed:
-            if "psa" in lbl or "bgs" in lbl or "cgc" in lbl or "sgc" in lbl:
-                continue
-            raw_m = m if raw_m is None else min(raw_m, m)
+
+    psa10_vals = [
+        m
+        for lbl, m in parsed
+        if re.search(r"\bpsa\b", str(lbl).lower()) and re.search(r"\b10\b", str(lbl).lower())
+    ]
+    psa10 = _median_simple(psa10_vals) if psa10_vals else None
+
+    raw_explicit = [m for lbl, m in parsed if _label_looks_explicit_raw(lbl)]
+    if raw_explicit:
+        raw_m = _median_simple(raw_explicit)
+    else:
+        floor_usd = 0.5
+        if psa10 is not None and psa10 > 0 and max_ratio > 0:
+            floor_usd = max(floor_usd, psa10 / max_ratio)
+        loose = [
+            m
+            for lbl, m in parsed
+            if not _label_looks_graded_slab(lbl) and m is not None and m >= floor_usd
+        ]
+        raw_m = _median_simple(loose) if loose else None
+
     if raw_m is None:
         mp = _num(flat.get("market_price"))
         if mp is not None and mp > 0:
             raw_m = mp
+
     if psa10 is None or raw_m is None or raw_m <= 0:
         return None
     ratio = psa10 / raw_m
+
+    if ratio > max_ratio or not math.isfinite(ratio):
+        return None
+    if raw_m < 1.0 and ratio > 30:
+        return None
+
     return {
         "psa10_median_usd": round(psa10, 4),
         "raw_median_usd": round(raw_m, 4),
@@ -198,7 +333,9 @@ def _fetch_tracked_cards(client: Any) -> List[Dict[str, Any]]:
     while True:
         q = (
             client.table("pokemon_cards")
-            .select("unique_card_id,set_code,name,number,image_url,rarity,market_price,metrics,tracked_priority")
+            .select(
+                "unique_card_id,set_code,name,number,image_url,rarity,market_price,metrics,price_history,tracked_priority"
+            )
             .gte("tracked_priority", 1)
             .order("tracked_priority")
             .range(start, start + _TRACKED_PAGE - 1)
@@ -230,7 +367,7 @@ def main() -> int:
         base = _card_summary(flat)
         if not base["unique_card_id"]:
             continue
-        pts = _justtcg_sorted(flat)
+        pts = _merged_daily_close_sorted(flat)
         pm = _prior_day_move(pts)
         if pm is not None and abs(pm["delta_usd"]) >= 0.01:
             prior.append({**base, **pm})

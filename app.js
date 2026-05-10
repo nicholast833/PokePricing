@@ -764,19 +764,19 @@ document.addEventListener('DOMContentLoaded', () => {
         trendingRoot.innerHTML = when
             + block(
                 'Prior-day price movers',
-                'Largest day-over-day move on Collectrics JustTCG daily close (tracked cards).',
+                'Largest day-over-day move on daily close (Collectrics JustTCG when present, else TCGGO market USD from synced history; tracked cards).',
                 prior,
                 'prior',
             )
             + block(
                 '7-day % movers',
-                'Collectrics JustTCG % change vs the last available point on or before seven days ago.',
+                '% change vs the last available daily close on or before seven days ago (same blended series as prior-day).',
                 week,
                 'week',
             )
             + block(
                 'PSA 10 vs raw lift',
-                'TCGGO eBay sold medians: PSA 10 divided by raw / ungraded (or market) where both exist.',
+                'TCGGO eBay sold medians: PSA 10 vs raw / ungraded (robust medians; extreme ratios omitted).',
                 grade,
                 'grade',
             );
