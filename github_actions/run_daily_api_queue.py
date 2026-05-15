@@ -36,8 +36,9 @@ logging.basicConfig(
     ]
 )
 
-# TCGGO history uses up to 3 paginated GETs per card (~90d) + 1 eBay sold + 1 Browse; keep batch smaller vs 800.
-BATCH_SIZE = 270
+# TCGGO history uses up to 3 paginated GETs per card (~90d) + 1 eBay sold + 1 Browse; cap vs RapidAPI daily budget.
+# Batch doubled (was 270 / 380) — runs were using ~half the budget.
+BATCH_SIZE = 540
 
 def _env_truthy(name: str) -> bool:
     v = (os.environ.get(name) or "").strip().lower()
@@ -280,5 +281,5 @@ def run_queue():
     logging.info("==========================================")
 
 if __name__ == '__main__':
-    BATCH_SIZE = 380
+    BATCH_SIZE = 760
     run_queue()
