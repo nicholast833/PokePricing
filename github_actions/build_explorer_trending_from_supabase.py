@@ -343,7 +343,7 @@ def _fetch_set_name_map(client: Any) -> Dict[str, str]:
     while True:
         res = (
             client.table("pokemon_sets")
-            .select("set_code,name,metadata")
+            .select("set_code,set_name,metadata")
             .order("set_code")
             .range(start, start + page - 1)
             .execute()
@@ -355,7 +355,7 @@ def _fetch_set_name_map(client: Any) -> Dict[str, str]:
             sc = str(r.get("set_code") or "").strip().lower()
             if not sc:
                 continue
-            nm = str(r.get("name") or r.get("set_name") or "").strip()
+            nm = str(r.get("set_name") or r.get("name") or "").strip()
             if not nm:
                 meta = r.get("metadata") if isinstance(r.get("metadata"), dict) else {}
                 nm = str(meta.get("set_name") or meta.get("title") or "").strip()
