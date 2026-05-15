@@ -724,8 +724,8 @@ html {
 
 .card-row {
     display: grid;
-    /* Thumb top-aligned so multi-line copy does not collide with the price column. */
-    grid-template-columns: calc(3.5rem * 63 / 88) minmax(0, 1fr) minmax(6.5rem, max-content);
+    /* Thumb + main: min ~10rem so card names wrap in words (~2–3 lines) instead of 1ch-wide columns. */
+    grid-template-columns: calc(3.5rem * 63 / 88) minmax(10rem, 1fr) minmax(6.5rem, max-content);
     gap: 0.55rem 0.75rem;
     align-items: start;
     padding: 0.55rem 0;
@@ -765,8 +765,8 @@ html {
 
 .card-row-main {
     min-width: 0;
-    overflow-wrap: anywhere;
-    word-break: break-word;
+    overflow-wrap: break-word;
+    word-break: normal;
 }
 
 .card-row-actions {
@@ -782,6 +782,11 @@ html {
 .card-name {
     font-weight: 500;
     font-size: 0.95rem;
+    line-height: 1.25;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    overflow: hidden;
 }
 
 .card-rarity {

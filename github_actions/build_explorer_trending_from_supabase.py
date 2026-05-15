@@ -17,6 +17,9 @@ Env: ``SUPABASE_URL`` + ``SUPABASE_SERVICE_ROLE_KEY`` or ``SUPABASE_KEY``.
 Optional: ``EXPLORER_TRENDING_MAX_PSA_RAW_RATIO`` (default ``75``) drops PSA10/raw rows above this ratio
 from ``psa10_vs_raw_leaders`` (guards mislabeled TCGGO grade rows).
 Optional: ``EXPLORER_PACK_TREND_DAYS`` (default ``14``) lookback for pack % trend.
+Optional: ``EXPLORER_TRENDING_TRACKED_PAGE`` (default ``200``) batch size for RPC / legacy pagination.
+Set ``EXPLORER_TRENDING_DISABLE_SLIM_RPC=1`` to force legacy full-row selects (apply migration
+``20260211120000_explorer_trending_tracked_cards_batch.sql`` for the slim RPC on Supabase).
 
   python github_actions/build_explorer_trending_from_supabase.py
   python github_actions/build_explorer_trending_from_supabase.py --dry-run
@@ -42,7 +45,98 @@ sys.path.insert(0, str(ROOT / "github_actions"))
 from supabase_wizard_dataset_bridge import _card_row_to_toplist_shape, _supabase  # noqa: E402
 
 _TOP_N = 20
-_TRACKED_PAGE = 800
+_TRACKED_PAGE_LEGACY = max(1, min(int(os.environ.get("EXPLORER_TRENDING_TRACKED_PAGE", "200")), 800))
+
+
+def _env_truthy(name: str) -> bool:
+    v = (os.environ.get(name) or "").strip().lower()
+    return v in ("1", "true", "yes", "on")
+
+
+def _tracked_row_from_slim_rpc(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Rebuild a pokemon_cards-shaped row for ``_card_row_to_toplist_shape`` (metrics + price_history slices only)."""
+    metrics: Dict[str, Any] = {}
+    v_eb = row.get("tcggo_ebay_sold_prices")
+    if isinstance(v_eb, list):
+        metrics["tcggo_ebay_sold_prices"] = v_eb
+    v_just = row.get("collectrics_history_justtcg")
+    if isinstance(v_just, list):
+        metrics["collectrics_history_justtcg"] = v_just
+    ph: Dict[str, Any] = {}
+    v_hist = row.get("tcggo_market_history")
+    if isinstance(v_hist, list):
+        ph["tcggo_market_history"] = v_hist
+    base = {
+        "unique_card_id": row.get("unique_card_id"),
+        "set_code": row.get("set_code"),
+        "name": row.get("name"),
+        "number": row.get("number"),
+        "image_url": row.get("image_url"),
+        "rarity": row.get("rarity"),
+        "market_price": row.get("market_price"),
+        "tracked_priority": row.get("tracked_priority"),
+    }
+    return {**base, "metrics": metrics, "price_history": ph}
+
+
+def _fetch_tracked_cards(client: Any) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    start = 0
+    page = max(1, min(int(os.environ.get("EXPLORER_TRENDING_TRACKED_PAGE", "200")), 500))
+    use_rpc = not _env_truthy("EXPLORER_TRENDING_DISABLE_SLIM_RPC")
+    warned_fallback = False
+
+    while True:
+        batch: List[Dict[str, Any]] = []
+        if use_rpc:
+            try:
+                res = client.rpc(
+                    "explorer_trending_tracked_cards_batch",
+                    {"p_offset": start, "p_limit": page},
+                ).execute()
+                raw = res.data or []
+                for x in raw:
+                    if isinstance(x, dict):
+                        batch.append(_tracked_row_from_slim_rpc(x))
+            except Exception as e:
+                err = str(e).lower()
+                if any(
+                    s in err
+                    for s in (
+                        "explorer_trending_tracked_cards_batch",
+                        "42883",
+                        "does not exist",
+                        "pgrst202",
+                    )
+                ):
+                    use_rpc = False
+                    if not warned_fallback:
+                        print(
+                            "explorer_trending_tracked_cards_batch unavailable; "
+                            "using legacy select (apply migration 20260211120000 for slim RPC).",
+                            flush=True,
+                        )
+                        warned_fallback = True
+                    continue
+                raise
+        if not use_rpc:
+            q = (
+                client.table("pokemon_cards")
+                .select(
+                    "unique_card_id,set_code,name,number,image_url,rarity,market_price,metrics,price_history,tracked_priority"
+                )
+                .gte("tracked_priority", 1)
+                .order("tracked_priority")
+                .range(start, start + _TRACKED_PAGE_LEGACY - 1)
+            )
+            res = q.execute()
+            batch = [dict(x) for x in (res.data or []) if isinstance(x, dict)]
+
+        out.extend(batch)
+        if len(batch) < page if use_rpc else len(batch) < _TRACKED_PAGE_LEGACY:
+            break
+        start += page if use_rpc else _TRACKED_PAGE_LEGACY
+    return out
 
 
 def _num(x: Any) -> Optional[float]:
@@ -467,28 +561,6 @@ def _fetch_pack_pricing_rows(client: Any) -> List[Dict[str, Any]]:
         return [x for x in data if isinstance(x, dict)]
     except Exception:
         return []
-
-
-def _fetch_tracked_cards(client: Any) -> List[Dict[str, Any]]:
-    out: List[Dict[str, Any]] = []
-    start = 0
-    while True:
-        q = (
-            client.table("pokemon_cards")
-            .select(
-                "unique_card_id,set_code,name,number,image_url,rarity,market_price,metrics,price_history,tracked_priority"
-            )
-            .gte("tracked_priority", 1)
-            .order("tracked_priority")
-            .range(start, start + _TRACKED_PAGE - 1)
-        )
-        res = q.execute()
-        batch = res.data or []
-        out.extend(batch)
-        if len(batch) < _TRACKED_PAGE:
-            break
-        start += _TRACKED_PAGE
-    return out
 
 
 def main() -> int:
