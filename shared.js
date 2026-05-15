@@ -1761,6 +1761,75 @@ const SHARED_UTILS = {
         return { labels, datasets };
     },
 
+    /**
+     * Per-grade USD from PriceCharting game-page scrape (`pricecharting_grade_prices`), when the daily
+     * sync merged slab columns (Ungraded … PSA 10). Shown even when `pricecharting_chart_data` is empty.
+     */
+    buildPricechartingGradesReferenceHtml(card) {
+        if (!card) return '';
+        const gp = card.pricecharting_grade_prices;
+        if (!gp || typeof gp !== 'object') return '';
+        const keys = Object.keys(gp).filter((k) => k && Number.isFinite(Number(gp[k])) && Number(gp[k]) > 0);
+        if (!keys.length) return '';
+        const esc = SHARED_UTILS.escHtml;
+        const fmt = SHARED_UTILS.fmtUsd;
+        const attr = SHARED_UTILS.escAttr;
+        const rank = (lab) => {
+            const s = String(lab).trim().toLowerCase().replace(/\s+/g, ' ');
+            if (s === 'ungraded' || s.includes('raw')) return -1e9;
+            if (s.includes('grade 9.5') || s.includes('9.5')) return 9.45;
+            const mG = s.match(/grade\s*(\d+(?:\.\d+)?)/);
+            if (mG) return 20 + parseFloat(mG[1]);
+            const mP = s.match(/psa\s*(\d+(?:\.\d+)?)/);
+            if (mP) return 40 + parseFloat(mP[1]);
+            const mB = s.match(/bgs\s*(\d+)/);
+            if (mB) return 60 + parseFloat(mB[1]);
+            const mC = s.match(/cgc\s*(\d+)/);
+            if (mC) return 80 + parseFloat(mC[1]);
+            return 500;
+        };
+        keys.sort((a, b) => rank(a) - rank(b) || String(a).localeCompare(String(b)));
+        const rows = keys.map((k) => {
+            const v = Number(gp[k]);
+            return `<tr><td>${esc(String(k))}</td><td>${fmt(v)}</td></tr>`;
+        }).join('');
+        const sync = card.pricecharting_sync_iso
+            ? ` · synced <code>${esc(String(card.pricecharting_sync_iso))}</code>`
+            : '';
+        const link = card.pricecharting_url
+            ? `<p class="card-detail-sub" style="margin-top:0.35rem;"><a class="card-detail-link" href="${attr(String(card.pricecharting_url))}" target="_blank" rel="noopener noreferrer">Open PriceCharting game page</a></p>`
+            : '';
+        return `
+            <div class="card-detail-section card-detail-section--full-width">
+                <h4>Graded price reference <span style="font-weight:400;color:#94a3b8;">(PriceCharting)${sync}</span></h4>
+                <p class="card-detail-sub" style="margin:0 0 0.5rem;">Listed USD by grade from the game-page table (not sold listings). Use with TCGGO / eBay blocks as a second opinion.</p>
+                <div class="card-detail-table-scroll"><table class="card-detail-mini-table"><thead><tr><th>Grade</th><th>USD</th></tr></thead><tbody>${rows}</tbody></table></div>
+                ${link}
+            </div>`;
+    },
+
+    /** When PriceCharting slab table is absent, show TCGGO /ebay-sold-prices medians as a text reference. */
+    buildTcggoGradedSoldReferenceTableHtml(card) {
+        const gp = card && card.pricecharting_grade_prices;
+        const hasPc = gp && typeof gp === 'object'
+            && Object.keys(gp).some((k) => k && Number.isFinite(Number(gp[k])) && Number(gp[k]) > 0);
+        if (hasPc) return '';
+        const rows = SHARED_UTILS.normalizeTcggoEbaySoldGradeRows(card);
+        if (!rows.length) return '';
+        const esc = SHARED_UTILS.escHtml;
+        const fmt = SHARED_UTILS.fmtUsd;
+        const syn = card.tcggo_ebay_sold_sync_iso
+            ? ` · synced <code>${esc(String(card.tcggo_ebay_sold_sync_iso))}</code>`
+            : '';
+        const body = rows.map((r) => `<tr><td>${esc(r.label)}</td><td>${fmt(r.median)}</td></tr>`).join('');
+        return `
+            <div class="card-detail-section card-detail-section--full-width">
+                <h4>Graded price reference <span style="font-weight:400;color:#94a3b8;">(TCGGO eBay medians)${syn}</span></h4>
+                <p class="card-detail-sub" style="margin:0 0 0.5rem;">Median sold USD by grader/grade from the TCGGO API (see also bar chart below).</p>
+                <div class="card-detail-table-scroll"><table class="card-detail-mini-table"><thead><tr><th>Grade</th><th>Median USD</th></tr></thead><tbody>${body}</tbody></table></div>
+            </div>`;
+    },
+
     /** Scrollable mini-table: snapshot dates vs ungraded / graded / box-only (USD). */
     buildPricechartingSnapshotTableHtml(card) {
         if (!card || !card.pricecharting_url) return '';
@@ -2958,6 +3027,12 @@ const SHARED_UTILS = {
         if (Number.isFinite(tgLatest) && tgLatest > 0) {
             statRows.push({ lbl: 'TCGGO / API latest', val: fmt(tgLatest) });
         }
+        if (card.pricecharting_used_price_usd != null && Number.isFinite(Number(card.pricecharting_used_price_usd))) {
+            statRows.push({ lbl: 'PC ungraded', val: fmt(card.pricecharting_used_price_usd) });
+        }
+        if (card.pricecharting_graded_price_usd != null && Number.isFinite(Number(card.pricecharting_graded_price_usd))) {
+            statRows.push({ lbl: 'PC graded (max)', val: fmt(card.pricecharting_graded_price_usd) });
+        }
         // eBay Sold prices (last sale) — merge scrape / Finding + optional ScrapeChain `ebay_sold_observations`
         const allEbaySold = SHARED_UTILS.ebaySoldRowsDeduped(card);
         const bySoldTime = (a, b) => {
@@ -3230,6 +3305,8 @@ const SHARED_UTILS = {
 
         const tcggoScoreBlock = SHARED_UTILS.buildTcggoStyleScorecardHtml(card);
 
+        const pcGradeRefBlock = SHARED_UTILS.buildPricechartingGradesReferenceHtml(card);
+
         const marketRowHtml = wizardBlock || ebayBrowseBlock
             ? `<div class="card-detail-market-row">${wizardBlock}${ebayBrowseBlock}</div>`
             : '';
@@ -3265,6 +3342,7 @@ const SHARED_UTILS = {
                 </div>
             </div>
             ${marketLiquidityBlock}
+            ${pcGradeRefBlock || ''}
             ${tcggoScoreBlock}
             ${tcggoEbaySoldBlock}
             ${bodyMainHtml}
@@ -3378,6 +3456,10 @@ const SHARED_UTILS = {
             </div>`);
             }
         }
+        const pcGrades = SHARED_UTILS.buildPricechartingGradesReferenceHtml(card);
+        if (pcGrades) parts.push(pcGrades);
+        const tgGrades = SHARED_UTILS.buildTcggoGradedSoldReferenceTableHtml(card);
+        if (tgGrades) parts.push(tgGrades);
         const pcTbl = SHARED_UTILS.buildPricechartingSnapshotTableHtml(card);
         if (pcTbl) {
             parts.push(`
