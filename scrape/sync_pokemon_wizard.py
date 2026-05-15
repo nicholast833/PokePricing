@@ -78,6 +78,7 @@ _T = TypeVar("_T")
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT / "github_actions"))
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(SCRIPT_DIR))
 from dataset_report_paths import WIZARD_SYNC_SKIPS_LOG, dataset_sidecar_report_path  # noqa: E402
